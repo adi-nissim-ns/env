@@ -1,0 +1,203 @@
+#!/bin/bash
+
+# == Color Codes ==
+# Reset
+NC='\033[0m' # No Color
+RED='\033[0;31m' # Red
+GREEN='\033[0;32m' # Green
+YELLOW='\033[0;33m' # Yellow
+BLUE='\033[0;34m' # Blue
+MAGENTA='\033[0;35m' # Magenta
+CYAN='\033[0;36m' # Cyan
+
+# Syntactic sugar for ANSI escape sequences
+txtblk='\e[0;30m' # Black - Regular
+txtred='\e[0;31m' # Red
+txtgrn='\e[0;32m' # Green
+txtylw='\e[0;33m' # Yellow
+txtblu='\e[0;34m' # Blue
+txtpur='\e[0;35m' # Purple
+txtcyn='\e[0;36m' # Cyan
+txtwht='\e[0;37m' # White
+bldblk='\e[1;30m' # Black - Bold
+bldred='\e[1;31m' # Red
+bldgrn='\e[1;32m' # Green
+bldylw='\e[1;33m' # Yellow
+bldblu='\e[1;34m' # Blue
+bldpur='\e[1;35m' # Purple
+bldcyn='\e[1;36m' # Cyan
+bldwht='\e[1;37m' # White
+unkblk='\e[4;30m' # Black - Underline
+undred='\e[4;31m' # Red
+undgrn='\e[4;32m' # Green
+undylw='\e[4;33m' # Yellow
+undblu='\e[4;34m' # Blue
+undpur='\e[4;35m' # Purple
+undcyn='\e[4;36m' # Cyan
+undwht='\e[4;37m' # White
+bakblk='\e[40m'   # Black - Background
+bakred='\e[41m'   # Red
+badgrn='\e[42m'   # Green
+bakylw='\e[43m'   # Yellow
+bakblu='\e[44m'   # Blue
+bakpur='\e[45m'   # Purple
+bakcyn='\e[46m'   # Cyan
+bakwht='\e[47m'   # White
+txtrst='\e[0m'    # Text Reset
+
+# ------------------------------------------------------------------
+# == Functions for Bash Scripts ==
+# ------------------------------------------------------------------
+
+# echo info to screen 
+function echo_info {
+    echo -e "${BLUE}ℹ️: ${@}${NC}"
+}
+function echo_warning {
+    echo -e "${YELLOW}⚠️: ${@}${NC}"
+}
+function echo_error {
+    echo -e "${RED}❌: ${@}${NC}"
+}
+function echo_success {
+    echo -e "${GREEN}✅: ${@}${NC}"
+}
+function echo_debug {
+    echo -e "${MAGENTA}🔍: ${@}${NC}"
+}
+function echo_running {
+    echo -e "${CYAN}🔄: ${@}${NC}"
+}
+
+function check_command {
+    if [ $? -ne 0 ]; then
+        echo_error "${@}"
+        # exit 1
+    else
+        echo_success "${@}"
+    fi
+}
+
+function check_command_silent {
+    if [ $? -ne 0 ]; then
+      echo_error "${@}"
+    fi
+}
+
+# run and check the command
+function run_command {
+    echo_running "${@}"
+    eval ${@}
+    check_command "${@}"
+}
+
+# run and check the command silently
+function run_command_silent {
+    # echo -e "${YELLOW}🔄: ${@}${NC}"
+    eval ${@}
+    check_command_silent "${@}"
+}
+
+# ------------------------------------------------------------------
+# function: create aliases for common commands
+# example: env_create_alias ll "ls -l"
+# ------------------------------------------------------------------
+function env_create_alias() {
+  if [ -z "$(alias $1 2>/dev/null)" ]; then
+    alias $1="$2"
+    echo_info "Created alias: $1 -> $2"
+  else
+    alias $1="$2"
+    # echo_info "Alias: $1"
+  fi
+}
+
+# ------------------------------------------------------------------
+# function: env_create_dir if it doesn't exist
+# example: env_create_dir /path/to/dir
+# ** create all the parent directories if they don't exist
+# ------------------------------------------------------------------
+function env_create_dir() {
+  # get host name
+  local HOST_NAME=$(hostname)
+  # if the host name is not slurm-client01 do 
+  if [ "$HOST_NAME" != "slurm-client01" ]; then
+    if [ ! -d "$1" ]; then
+      run_command mkdir -p $1
+    fi
+  fi
+}
+
+#------------------------------------------------------------------
+# function: create softlink if it doesn't exist
+# example: create_softlink /path/to/target /path/to/link
+# ** create all the parent directories if they don't exist
+# ** check if the target exists
+# ------------------------------------------------------------------
+function create_softlink() {
+  if [ ! -L "$2" ]; then
+    if [ ! -e "$2" ]; then
+      ln -s "$1" "$2"
+      echo_info "Created softlink: $2 -> $1" 
+    # else
+    #   echo "Link already exists: $2"
+    fi
+  # else
+    # echo "Softlink already exists: $2"
+  fi
+}
+
+# ------------------------------------------------------------------
+# function: fix-ps1
+# ------------------------------------------------------------------
+
+function fix-ps1() {
+    # u is user
+    # h is hostname
+    # w is current working directory
+    # \$(parse_git_branch) is the current git branch
+    # \$(get_venv_name) is the current virtual environment name
+
+
+    # create a inner function to generate the color warraper that gets the color as input 
+    function color_wrap() {
+        local color=$1
+        echo -e "\[${color}\]"
+    }
+
+    function parse_git_branch() {
+        # get the current branch name
+        ENV_GIT_PS1=$(git symbolic-ref --short HEAD 2> /dev/null)
+        if [ -n "$ENV_GIT_PS1" ]; then
+            ENV_GIT_PS1=" [$ENV_GIT_PS1]"
+            ENV_FINAL_SPACE=""
+        else
+            ENV_GIT_PS1=""
+            ENV_FINAL_SPACE=" "
+        fi
+        echo $ENV_GIT_PS1
+    }
+
+    function get_venv_name() {
+        # Get the name of the current virtual environment
+        if [ -n "$VIRTUAL_ENV" ]; then
+        # Extract the name from the path
+        VENV_NAME=$(basename "$VIRTUAL_ENV")
+        # echo "$VENV_NAME"
+        else
+        VENV_NAME=""
+        # echo "No virtual environment activated."
+        fi
+
+        if [ -n "$VENV_NAME" ]; then
+            VENV_NAME="($VENV_NAME) "
+        else
+            VENV_NAME=""
+        fi
+        echo  $VENV_NAME  
+    }
+    export PROMPT_COMMAND='PS1="\[\]$(color_wrap $GREEN)\$(get_venv_name) $(color_wrap $txtylw)\u$(color_wrap $NC)@$(color_wrap $txtylw)\h $(color_wrap $bldcyn)\w$(color_wrap $RED) \$(parse_git_branch)$(color_wrap $NC)\$ \[\]"'
+    PS1=${PROMPT_COMMAND}
+}
+
+

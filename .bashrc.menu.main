@@ -1,0 +1,75 @@
+#!/bin/bash
+
+_ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+
+function menu() {
+  echo ""
+  echo "====================menu===================="
+  echo "0. Exit"
+  echo "1. fix-ps1"
+  echo "2. enter menu-run"
+  echo "3. enter menu-slurm"
+  echo "4. enter menu-env"
+  echo "5. Known aliases"
+  echo "6. Known parameters"
+  echo "7. Activate Python virtual environment"
+  echo "=====================menu===================="
+  
+  read -p "Select an option: " option
+  case $option in
+    0)
+      echo "Exiting..."
+      return 0
+      ;;
+    1)
+      echo "Fixing PS1..."
+      fix-ps1
+      ;;
+    2)
+      menu-run
+      ;;
+    3)
+      menu-slurm
+      ;;
+    4)
+      menu-env
+      ;;
+    5)
+      echo "Known aliases:"
+      echo "cdsw   : Change to SW_HOME    directory: ${SW_HOME}"
+      echo "cdnext : Change to NEXT_HOME  directory: ${NEXT_HOME}"
+      echo "cdutils: Change to NEXTUTILS  directory: ${NEXTUTILS}"
+      echo "..     : Change to parent directory"
+      echo "...    : Change to grandparent directory"
+      echo "....   : Change to great-grandparent directory"
+      echo "lookfor: grep -rnw . -e "
+      ;;
+    6)
+      echo "Known params:"
+      echo "  SPACE_PATH     directory: ${SPACE_PATH}"
+      echo "  NEXT_HOME      directory: ${NEXT_HOME}"
+      echo "  SW_HOME        directory: ${SW_HOME}"
+      echo "  NEXTUTILS      directory: ${NEXTUTILS}"
+      echo "  CCACHE_DIR     directory: ${CCACHE_DIR}"
+      echo "  CONAN_HOME     directory: ${CONAN_USER_HOME}"
+      echo "  XDG_CACHE_HOME directory: ${XDG_CACHE_HOME}"
+      echo "  _ENV_DIR       directory: ${_ENV_DIR}"
+      echo "  _ENV           directory: ${_ENV}"
+      echo "  _SPACE_DIR     directory: ${_SPACE_DIR}"
+      echo "  _OS            directory: ${_OS}"
+      echo "  _BASH_VENV     directory: ${_BASH_VENV}"
+      echo "  _FISH_VENV     directory: ${_FISH_VENV}"
+      echo "  _PRIVATE_VENV  directory: ${_PRIVATE_VENV}"
+      echo "  _NEXTSW_VENV   directory: ${_NEXTSW_VENV}"
+      ;;
+    7)
+      activate_python_env
+      ;;
+    *)
+      echo "Invalid option. Please try again."
+      menu
+      ;;
+  esac
+}
+
+echo_info "Loading menu ..."

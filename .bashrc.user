@@ -1,0 +1,96 @@
+#!/bin/bash
+
+_ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+
+source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
+run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.user_env_vars
+run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.funcs
+run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.main
+run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.slurm
+run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.run
+run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.env
+
+#------------------------------------------------------------------
+# Create directories if they don't exist
+# Create aliases for common commands
+# Create softlinks for conan and cache
+#------------------------------------------------------------------
+env_create_dir ${NEXT_HOME}
+env_create_dir ${SW_HOME}
+env_create_dir ${NEXTUTILS}
+
+env_create_alias cdsw "cd ${SW_HOME}"
+env_create_alias cdnext "cd ${NEXT_HOME}"
+env_create_alias cdutils "cd ${NEXTUTILS}"
+env_create_alias .. "cd .."
+env_create_alias ... "cd ../.."
+env_create_alias .... "cd ../../.."
+env_create_alias lookfor "grep -rnw . -e " 
+
+create_softlink ${XDG_CACHE_HOME} ~/.cache
+
+#------------------------------------------------------------------
+# recomended setup for bashrc
+#------------------------------------------------------------------
+
+
+
+if [ "${LMOD_SETUP}" != true ]; then
+  echo "Loading Lmod..."
+  source /etc/profile.d/lmod.sh
+  module load GCCcore/12.3.0 Clang/16.0.6
+  export LMOD_SETUP=true
+fi
+
+function are_we_in_a_development_host
+{
+  # Check if we are in a development host
+  local dev_hosts=("dev-sw04" "dev-sw05" "dev-sw02")
+  local current_host=$(hostname)
+  for host in "${dev_hosts[@]}"; do
+    if [[ "$current_host" == "$host" ]]; then
+      return 0  # We are in a development host
+    fi
+  done
+  return 1  # We are not in a development host
+}
+
+# do if we are on a development host
+if are_we_in_a_development_host; then
+  #------------------------------------------------------------------
+  #  Setup rust environment
+  #------------------------------------------------------------------
+  echo ""
+  # Check if rust is installed
+  if [ -d "${CARGO_HOME}" ]; then
+    echo "Rust is already installed."
+  else
+    echo "Rust is not installed. Installing..."
+    setup_rust_env
+  fi
+
+  #------------------------------------------------------------------
+  #  Setup python environment
+  #------------------------------------------------------------------
+  echo ""
+
+  # Check if python_venv directory exists
+  if [ -d "${_PY_VENV}" ]; then
+    echo "Python virtual environment already exists at ${_PY_VENV}"
+  else
+    echo "Python virtual environment does not exist. Creating..."
+    setup_python_env
+  fi
+fi  
+
+
+# -------------------------------------------------
+# run: menu-slurm 
+# -------------------------------------------------
+# run_command_silent menu-slurm
+if [ "$(hostname)" == "slurm-client01" ]; then
+  menu-slurm
+fi
+
+fix-ps1
+PS1=${PROMPT_COMMAND}

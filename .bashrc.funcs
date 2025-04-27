@@ -1,0 +1,103 @@
+#!/bin/bash
+
+_ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+
+# source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
+# run_command source ${_ENV_PROJECT_DIR}/.bashrc.user_env_vars
+#------------------------------------------------------------------
+######## Load ssh agent:
+function load-agent() {
+	run_command eval `ssh-agent`
+	run_command ssh-add
+}
+
+######## Short cuts for loading env:
+# Loads env including python:
+function next-venv() {
+  run_command source ${NEXTUTILS}/.buildtools_venv/bin/activate
+}
+
+# unloads the drivers for a hardware:
+function unload-drv() {
+  run_command ${NEXTUTILS}/setup.sh --unload-drivers
+}
+# Loads the drivers for a hardware:
+function load-drv() {
+  run_command ${NEXTUTILS}/setup.sh --load-drivers
+}
+# Loads the drivers for a hardware:
+function reload-drv() {
+  run_command ${NEXTUTILS}/setup.sh --reload-drivers
+}
+# Loads both env and drivers in one line:
+function prep-run {
+  next-venv
+  load-drv
+}
+
+######## Slurm shortcuts:
+export SALLOC_SHORT48="salloc --partition=cloud --nodes=1 --time=48:00:00 --exclusive --no-shell"
+function slalloc () {
+  # salloc --partition=VM-Maverick --nodes=1 --time=${1}:00:00 --exclusive --no-shell
+  # check if $1 has been passed
+  if [ -z "$1" ]; then
+    echo_warning "No argument supplied. Using default time of 48 hours"
+    run_command salloc --partition=cloud --nodes=1 --time=48:00:00 --exclusive --no-shell
+  else 
+    echo "Using time: $1"
+    # check if file exists
+    if [[ ! "$1" =~ ^[0-9]+$ ]]; then
+      echo_warning "Argument $1 is not a number. Using default time of 48 hours"
+      run_command salloc --partition=cloud --nodes=1 --time=48:00:00 --exclusive --no-shell
+    else
+      echo_info "Using time: $1"
+      run_command salloc --partition=cloud --nodes=1 --time=${1}:00:00 --exclusive --no-shell
+    fi        
+  fi
+}
+
+function setup_rust_env() {
+  # Select path for cargo, this is the default cargo path
+  # Use variable so commands would be more generic
+  export CARGO_HOME=~/.cargo
+
+  # install Rust
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+
+  # Not mandatory on local setups
+  PATH=${CARGO_HOME}/bin:$PATH
+  cat <<EOF > ${CARGO_HOME}/config.toml
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+EOF
+  ${CARGO_HOME}/bin/rustup component add llvm-tools-preview
+  curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME}/bin
+  ${CARGO_HOME}/bin/cargo install cargo-llvm-cov
+}
+
+function setup_python_env() {
+  # # Check if python3-venv is installed
+  # if ! dpkg -s python3-venv &> /dev/null; then
+  #   echo "python3-venv is not installed. Installing..."
+  #   sudo apt-get install -y python3-venv
+  # fi
+
+  /tools/common/pkgs/pyenv/rocky9/versions/3.10.13/bin/python -m venv ${_PY_VENV}
+  echo "Python virtual environment created at ${_PY_VENV}"
+  fix-ps1
+}
+
+function activate_python_env() {
+  echo "Activating Python virtual environment at ${_PY_VENV}"
+  
+  # Check if the virtual environment directory exists
+  if [ ! -d "${_PY_VENV}" ]; then
+    echo "Python virtual environment does not exist at ${_PY_VENV}. Please create it first."
+    return
+  fi
+
+  # Activate the virtual environment
+  source ${_PY_VENV}/bin/activate && echo "Python virtual environment activated successfully. (to exit write 'deactivate' and to activate write 'activate_python_env')"
+  fix-ps1
+}
+

@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------
+# recomended setup for bashrc
+# ------------------------------------------------------------------
+SHARED_SPACE_NAME=space3
+# SHARED_SPACE_NAME=space2
+
+SPACE_PATH="/${SHARED_SPACE_NAME}/users/${USER}/"
+echo "Welcome to ${USER} on ${SHARED_SPACE_NAME}!"
+
+[ -z "$PS1" ] && return
+  _SPACE_DIR=${SPACE_PATH}
+
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    _OS=$ID
+    export CC=clang
+    export CXX=clang++
+    export CURL_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.trust.crt
+    _ENV=env_${_OS} # supported _ENV=env_rhel/env_debian
+else
+    _OS="debian"
+    export CC=clang
+    export CXX=clang++
+    _ENV=env_${_OS} # supported _ENV=env_rhel/env_debian
+fi  
+
+_ENV_DIR="${_SPACE_DIR}/${_ENV}"
+export NEXT_HOME="${_ENV_DIR}/next_home"
+export SW_HOME="/${SHARED_SPACE_NAME}/users/${USER}/sw"
+export NEXTUTILS="${SW_HOME}/nextutils"
+
+#------------------------------------------------------------------
+# Slurm shortcuts:
+#------------------------------------------------------------------
+export SSH_SLURM="ssh ${USER}@slurm-client01.il.nextsilicon.com"
+
+#------------------------------------------------------------------
+# function: setup python environment (venv)
+#------------------------------------------------------------------
+export _PY_VENV=${_ENV_DIR}/python_venv
+
+# ------------------------------------------------------------------
+# FOR VSCode
+# ------------------------------------------------------------------
+shopt -s direxpand
+_BASEDIR=/${SHARED_SPACE_NAME}/users/$USER
+_USE_PRIVATE_VENV=true
+
+export CONAN_USER_HOME=${_ENV_DIR}/conan
+export XDG_CACHE_HOME=${_BASEDIR}/.cache  # Intellisense cache performance
+
+export CCACHE_DIR=${_ENV_DIR}/ccache
+export _NEXTSW_VENV="/tools/common/pkgs/pyenv/debian/versions/3.9.0/envs/sw"
+export _PRIVATE_VENV="${_ENV_DIR}/private_venv/"
+
+if [ "$_USE_PRIVATE_VENV" = true ] ; then
+    export _FISH_VENV=$_PRIVATE_VENV
+    export _BASH_VENV=$_PRIVATE_VENV
+else
+    export _FISH_VENV=$_NEXTSW_VENV
+    export _BASH_VENV=$_NEXTSW_VENV
+fi
+
+PATH=${PATH}:/tools/common/sw/bin:${_SPACE_DIR}/.local/bin/
+
+export OBJDUMP="${NEXT_HOME}/llvm/bin/objdump"
+export DIS=${NEXT_HOME}/llvm/bin/llvm-dis
+export FORMAT_LLVM="git clang-format-7 --binary clang-format-12"
+export GSMU="git submodule update --init --recursive"
+export NINJA="${NEXTUTILS}/.buildtools_venv/bin/ninja"
+
+SYSROOT_PATH=${NEXT_HOME}/sysroot/usr
+MPI_PATH=${OPENMPI_PATH:-$NEXT_HOME}
+export OPAL_PREFIX=${MPI_PATH}
+export PATH=${NEXT_HOME}/bin:${MPI_PATH}/bin:$PATH
+
+export OMPI_MPICC=nextcc
+export OMPI_MPICXX=nextcxx
+export OMPI_MPIFC=nextflang

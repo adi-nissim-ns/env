@@ -1,0 +1,138 @@
+#!/bin/bash
+
+_ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+
+function webserver_cleanup {
+  echo_error " TODO: add this" 
+}
+
+function run_nextdaemon {
+  # ask the user if they want to continue with default cfg file
+  read -p "Do you want to continue with the default cfg file? (y/n): " choice
+  case "$choice" in
+      y|Y ) 
+          echo "Continuing with default cfg file..."
+          cfg_options=""
+          ;;
+      * ) 
+          # get from user a cfg file   
+          echo_info "Please enter the path to the cfg file: "
+          read cfg_file
+          if [ ! -f $cfg_file ]; then
+              echo_error "File not found!" 
+              return 1
+          else
+              cfg_options="--cfg-file $cfg_file"           
+          fi          
+          ;;
+  esac   
+
+  echo_running $NEXT_HOME/bin/nextdaemon $cfg_options
+  $NEXT_HOME/bin/nextdaemon $cfg_options
+  if [ $? -ne 0 ]; then
+      echo_error "${@}"
+      
+      # ask the user if they want to continue without a device 
+      read -p "Do you want to continue without a device? (y/n): " choice
+      case "$choice" in
+          y|Y ) 
+              echo "Continuing without a device..."
+              run_command $NEXT_HOME/bin/nextdaemon $cfg_options --allow-no-device
+              ;;
+          * ) 
+              ;;
+      esac
+  else
+      echo_success "${@}"
+  fi
+}
+
+function menu-run() {
+  echo ""
+  echo "====================menu-run===================="
+  echo "0.  Exit"
+  echo "1.  Main menu"
+  echo ""
+  echo "-.  ssh <vm_name>"
+  echo ""
+  echo "2.  drivers: reload"
+  echo "3.  drivers: unload"
+  echo "4.  drivers: load"
+  echo "5.  drivers: show (lsmod)"
+  echo ""
+  echo "6.  nextdaemon -cfg-file <cfg file> "
+  echo ""
+  echo "7.  nextcli: handof: enable"
+  echo "8.  nextcli: handof: disable"
+  echo ""
+  echo "-.  $NEXT_HOME/bin/nextloader --cfg-file <cfg file> -- <exe> <exe_params>"
+  echo "9.  nextcli: runtime status"
+  echo ""
+  echo "10. webserver: run"
+  echo "11. webserver: install"
+  echo "12. webserver: cleanup (todo)"
+  echo "=====================menu-run==================="
+  
+  read -p "Select an option: " option
+  case $option in
+    0)
+      echo "Exiting..."
+      return 0
+      ;;
+    1)
+      menu 
+      ;;
+    2)
+      reload-drv
+      menu-run
+      ;;
+    3)
+      unload-drv
+      menu-run
+      ;;
+    4)
+      load-drv
+      menu-run
+      ;;
+    5)
+      run_command lsmod
+      menu-run        
+      ;;
+    6)
+      # echo_info which nextdaemon
+      run_nextdaemon
+      menu-run
+      ;;
+    7)
+      run_command $NEXT_HOME/bin/nextcli runtime handoff enable
+      menu-run
+      ;;
+    8)
+      run_command $NEXT_HOME/bin/nextcli runtime handoff disable
+      menu-run
+      ;;
+    9)
+      run_command $NEXT_HOME/bin/nextcli runtime status
+      menu-run
+      ;;      
+    10)
+      run_command nextcli webapps-server
+      menu-run
+      ;;      
+    11)
+      cdutils
+      run_command ./setup.sh --fetch-webapps
+      menu-run
+      ;;
+    12) 
+      webserver_cleanup
+      menu-run
+      ;;
+    *)
+      echo "Invalid option. Please try again."
+      menu_run
+      ;;
+  esac
+}
+
+echo_info "Loading menu-run ..."
