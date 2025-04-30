@@ -10,19 +10,20 @@ function menu() {
   echo "2. enter menu-run"
   echo "3. enter menu-slurm"
   echo "4. enter menu-env"
-  echo "5. Known aliases"
-  echo "6. Known parameters"
-  echo "7. Activate Python virtual environment"
+  echo "5. enter menu-kokkos"
+  echo "6. Known aliases"
+  echo "7. Known parameters"
+  echo "8. Activate Python virtual environment"
   echo "=====================menu===================="
   
   read -p "Select an option: " option
   case $option in
     0)
-      echo "Exiting..."
+      echo_running "Exiting..."
       return 0
       ;;
     1)
-      echo "Fixing PS1..."
+      echo_running "Fixing PS1..."
       fix-ps1
       ;;
     2)
@@ -35,6 +36,9 @@ function menu() {
       menu-env
       ;;
     5)
+      menu-kokkos
+      ;;
+    6)
       echo "Known aliases:"
       echo "cdsw   : Change to SW_HOME    directory: ${SW_HOME}"
       echo "cdnext : Change to NEXT_HOME  directory: ${NEXT_HOME}"
@@ -44,25 +48,25 @@ function menu() {
       echo "....   : Change to great-grandparent directory"
       echo "lookfor: grep -rnw . -e "
       ;;
-    6)
-      echo "Known params:"
-      echo "  SPACE_PATH     directory: ${SPACE_PATH}"
-      echo "  NEXT_HOME      directory: ${NEXT_HOME}"
-      echo "  SW_HOME        directory: ${SW_HOME}"
-      echo "  NEXTUTILS      directory: ${NEXTUTILS}"
-      echo "  CCACHE_DIR     directory: ${CCACHE_DIR}"
-      echo "  CONAN_HOME     directory: ${CONAN_USER_HOME}"
-      echo "  XDG_CACHE_HOME directory: ${XDG_CACHE_HOME}"
-      echo "  _ENV_DIR       directory: ${_ENV_DIR}"
-      echo "  _ENV           directory: ${_ENV}"
-      echo "  _SPACE_DIR     directory: ${_SPACE_DIR}"
-      echo "  _OS            directory: ${_OS}"
-      echo "  _BASH_VENV     directory: ${_BASH_VENV}"
-      echo "  _FISH_VENV     directory: ${_FISH_VENV}"
-      echo "  _PRIVATE_VENV  directory: ${_PRIVATE_VENV}"
-      echo "  _NEXTSW_VENV   directory: ${_NEXTSW_VENV}"
-      ;;
     7)
+      echo "Known params:"
+      echo "  SPACE_PATH      directory: ${SPACE_PATH}"
+      echo "  NEXT_HOME       directory: ${NEXT_HOME}"
+      echo "  SW_HOME         directory: ${SW_HOME}"
+      echo "  NEXTUTILS       directory: ${NEXTUTILS}"
+      echo "  CCACHE_DIR      directory: ${CCACHE_DIR}"
+      echo "  CONAN_USER_HOME directory: ${CONAN_USER_HOME}"
+      echo "  XDG_CACHE_HOME  directory: ${XDG_CACHE_HOME}"
+      echo "  _ENV_DIR        directory: ${_ENV_DIR}"
+      echo "  _ENV            directory: ${_ENV}"
+      echo "  _SPACE_DIR      directory: ${_SPACE_DIR}"
+      echo "  _OS             directory: ${_OS}"
+      echo "  _BASH_VENV      directory: ${_BASH_VENV}"
+      echo "  _FISH_VENV      directory: ${_FISH_VENV}"
+      echo "  _PRIVATE_VENV   directory: ${_PRIVATE_VENV}"
+      echo "  _NEXTSW_VENV    directory: ${_NEXTSW_VENV}"
+      ;;
+    8)
       activate_python_env
       ;;
     *)

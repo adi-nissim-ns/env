@@ -1,0 +1,86 @@
+#!/bin/bash
+
+
+_ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+# https://github.com/nextsilicon/kokkos 
+
+function clone_kokkos() {
+  run_command cdsw
+  run_command pwd
+  run_command git clone --recurse-submodules git@github.com:nextsilicon/kokkos.git
+  cd kokkos
+  run_command pwd
+}
+
+function build_kokkos() {
+  run_command cdsw
+  run_command cd kokkos
+  run_command pwd
+  run_command ./build.sh --uvm --benchmarks --tests
+}
+
+function clean_kokkos() {
+  # check with user if he wants to clean the build
+  read -p "Are you sure you want to clean the build? (y/n): " answer
+  if [[ $answer == "y" || $answer == "Y" ]]; then
+    run_command cdsw
+    run_command cd kokkos
+    run_command pwd
+    run_command ./build.sh --clean
+    # if command was not successful
+    if [ $? -ne 0 ]; then
+      # check if to delete the build directory 
+      read -p "Do you want to delete the build directory? (y/n): " answer
+      if [[ $answer == "y" || $answer == "Y" ]]; then
+        run_command cdsw
+        run_command cd kokkos
+        run_command pwd
+        run_command rm -rf build
+      else
+        echo_info "Build directory not deleted."
+      fi
+    fi
+  else
+    echo_info "Build not cleaned."
+  fi
+}
+  
+function menu-kokkos() {
+  echo ""
+  echo "====================menu-kokkos===================="
+  echo "0. Exit"
+  echo "1. Main menu"
+  echo "2. clone kokkos"
+  echo "3. build kokkos"  
+  echo "4. clean build"
+  echo "=====================menu-kokkos==================="
+  
+  read -p "Select an option: " option
+  case $option in
+    0)
+      echo "Exiting..."
+      return 0
+      ;;
+    1)
+      menu 
+      ;;
+    2)
+      clone_kokkos
+      menu-kokkos 
+      ;;
+    3)
+      build_kokkos
+      menu-kokkos
+      ;;
+    4)  
+      clean_kokkos 
+      menu-kokkos
+      ;;   
+    *)
+      echo "Invalid option. Please try again."
+      menu-kokkos
+      ;;
+  esac
+}
+
+echo_info "Loading menu-kokkos ..."

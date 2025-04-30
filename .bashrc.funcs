@@ -82,8 +82,8 @@ function setup_python_env() {
   #   sudo apt-get install -y python3-venv
   # fi
 
-  /tools/common/pkgs/pyenv/rocky9/versions/3.10.13/bin/python -m venv ${_PY_VENV}
-  echo "Python virtual environment created at ${_PY_VENV}"
+  run_command /tools/common/pkgs/pyenv/rocky9/versions/3.10.13/bin/python -m venv ${_PY_VENV}
+  echo_info echo "Python virtual environment created at ${_PY_VENV}"
   fix-ps1
 }
 
@@ -97,7 +97,7 @@ function activate_python_env() {
   fi
 
   # Activate the virtual environment
-  source ${_PY_VENV}/bin/activate && echo "Python virtual environment activated successfully. (to exit write 'deactivate' and to activate write 'activate_python_env')"
+  run_command source ${_PY_VENV}/bin/activate && echo "Python virtual environment activated successfully. (to exit write 'deactivate' and to activate write 'activate_python_env')"
   fix-ps1
 }
 

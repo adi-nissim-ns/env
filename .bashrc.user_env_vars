@@ -48,10 +48,12 @@ shopt -s direxpand
 _BASEDIR=/${SHARED_SPACE_NAME}/users/$USER
 _USE_PRIVATE_VENV=true
 
-export CONAN_USER_HOME=${_ENV_DIR}/conan
+# export CONAN_USER_HOME=${_ENV_DIR}/conan
+# export CCACHE_DIR=${_ENV_DIR}/ccache
+# export CONAN_HOME="/space3/users/${USER}/.conan2"
 export XDG_CACHE_HOME=${_BASEDIR}/.cache  # Intellisense cache performance
 
-export CCACHE_DIR=${_ENV_DIR}/ccache
+# export CCACHE_DIR="/space3/users/${USER}/.ccache"
 export _NEXTSW_VENV="/tools/common/pkgs/pyenv/debian/versions/3.9.0/envs/sw"
 export _PRIVATE_VENV="${_ENV_DIR}/private_venv/"
 

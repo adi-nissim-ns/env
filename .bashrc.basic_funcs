@@ -72,9 +72,10 @@ function echo_running {
 function check_command {
     if [ $? -ne 0 ]; then
         echo_error "${@}"
-        # exit 1
+        return 1
     else
         echo_success "${@}"
+        return 0
     fi
 }
 
