@@ -1,0 +1,117 @@
+{
+	"folders": [
+	  {
+		"name": "kokkos",
+		"path": "../kokkos"
+	  },
+	  {
+		"name": "vscode",
+		"path": "../.vscode"
+	  }
+	],
+	"settings": {
+	  "cmake.sourceDirectory": "${workspaceFolder:kokkos}",
+	  "cmake.buildDirectory": "${workspaceFolder:kokkos}/build",
+	  "terminal.integrated.env.linux": {
+		"PATH": "/space3/users/adin/sw/.vscode/kokkos:${env:PATH}"
+	  },
+	  "cmake.autoConfigure": false,
+	  "cmake.autoBuild": false,
+	  "cmake.automaticReconfigure": false,
+	  "cmake.buildBeforeRun": false,
+	  "cmake.configureOnOpen": false,
+	  "cmake.useCMakePresets": "never"
+	},
+	"tasks": {
+	  "version": "2.0.0",
+	  "tasks": [
+		{
+			"label": "Build Kokkos (build.sh --uvm --tests) : ctrl + shift + b",
+			"type": "shell",
+			"command": "bash",
+			"args": ["-l", "-c", "./build.sh --uvm --tests"],
+			"options": {
+			  "cwd": "${workspaceFolder:kokkos}"
+			},
+			"group": {
+			  "kind": "build",
+			  "isDefault": true
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Build Kokkos:  --uvm --benchmarks --tests",
+			"type": "shell",
+			"command": "bash",
+			"args": ["-l", "-c", "./build.sh --uvm --benchmarks --tests"],
+			"options": {
+			  "cwd": "${workspaceFolder:kokkos}"
+			},
+			"group": {
+			  "kind": "build",
+			  "isDefault": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Run Kokkos Tests (test.sh)",
+			"type": "shell",
+			"command": "bash",
+			"args": ["-l", "-c", "./test.sh"],
+			"options": {
+			  "cwd": "${workspaceFolder:kokkos}"
+			},
+			"group": "test",
+			"problemMatcher": []
+		}
+	  ]
+	},
+	"launch": {
+	  "version": "0.2.0",
+	  "configurations": [
+		{
+		  "name": "Kokkos_PerformanceTest_Benchmark",
+		  "type": "cppdbg",
+		  "request": "launch",
+		  "program": "${workspaceFolder:kokkos}/build/core/perf_test/Kokkos_PerformanceTest_Benchmark",
+		  "args": [
+			"--benchmark_counters_tabular=true",
+			"--benchmark_out=Kokkos_PerformanceTest_Benchmark_2025-04-30_T07-15-15.json"
+		  ],
+		  "stopAtEntry": false,
+		  "cwd": "${workspaceFolder:kokkos}",
+		  "environment": [],
+		  "externalConsole": false,
+		  "MIMode": "gdb",
+		  "setupCommands": [
+			{
+			  "description": "Enable pretty-printing",
+			  "text": "-enable-pretty-printing",
+			  "ignoreFailures": true
+			}
+		  ]
+		},
+		{
+			"name": "Kokkos_CoreUnitTest_Default",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceFolder:kokkos}/build/core/unit_test/Kokkos_CoreUnitTest_Default",
+			"args": [
+			],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder:kokkos}",
+			"environment": [],
+			"externalConsole": false,
+			"MIMode": "gdb",
+			"setupCommands": [
+			  {
+				"description": "Enable pretty-printing",
+				"text": "-enable-pretty-printing",
+				"ignoreFailures": true
+			  }
+			]
+		  }
+	  ]
+	}
+  }
+  
