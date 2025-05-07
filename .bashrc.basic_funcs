@@ -9,6 +9,7 @@ YELLOW='\033[0;33m' # Yellow
 BLUE='\033[0;34m' # Blue
 MAGENTA='\033[0;35m' # Magenta
 CYAN='\033[0;36m' # Cyan
+ORANGE='\033[0;38;5;208m' # Orange
 
 # Syntactic sugar for ANSI escape sequences
 txtblk='\e[0;30m' # Black - Regular
@@ -54,7 +55,7 @@ function echo_info {
     echo -e "${BLUE}ℹ️: ${@}${NC}"
 }
 function echo_warning {
-    echo -e "${YELLOW}⚠️: ${@}${NC}"
+    echo -e "${ORANGE}⚠️: ${@}${NC}"
 }
 function echo_error {
     echo -e "${RED}❌: ${@}${NC}"
@@ -104,12 +105,25 @@ function run_command_silent {
 # example: env_create_alias ll "ls -l"
 # ------------------------------------------------------------------
 function env_create_alias() {
+  # check if the alias already exists
   if [ -z "$(alias $1 2>/dev/null)" ]; then
     alias $1="$2"
     echo_info "Created alias: $1 -> $2"
   else
     alias $1="$2"
     # echo_info "Alias: $1"
+  fi
+}
+env_create_cd_alias() {
+  local alias_name=$1
+  local target_dir=$2
+
+  # check if the directory exists
+  if [ -d "$target_dir" ]; then
+    env_create_alias $alias_name "cd $target_dir"
+  else
+    echo_warning "Do nothing: $target_dir does not exist. Cannot create alias $alias_name."
+    return 1
   fi
 }
 

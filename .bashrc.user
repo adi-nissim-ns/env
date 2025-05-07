@@ -22,10 +22,13 @@ env_create_dir ${NEXTUTILS}
 env_create_dir /space3/users/${USER}/.conan2
 env_create_dir /space3/users/${USER}/.ccache
 
+echo ""
+env_create_cd_alias cdenv "$_ENV_PROJECT_DIR"
+env_create_cd_alias cdsw "${SW_HOME}"
+env_create_cd_alias cdnext "${NEXT_HOME}"
+env_create_cd_alias cdutils "${NEXTUTILS}"
+env_create_cd_alias cdkokkos "${SW_HOME}/kokkos"
 
-env_create_alias cdsw "cd ${SW_HOME}"
-env_create_alias cdnext "cd ${NEXT_HOME}"
-env_create_alias cdutils "cd ${NEXTUTILS}"
 env_create_alias .. "cd .."
 env_create_alias ... "cd ../.."
 env_create_alias .... "cd ../../.."
