@@ -32,6 +32,7 @@ function menu-slurm() {
   echo "6. step4: allocate bare metal HW resource in partition=BM-Maverick2-Single, hours=9(salloc)" 
   echo "7. step4: reserve a HW resource in partition=cloud, hours=9(salloc)"
   echo "8. step4: reserve bare metal HW resource in partition=BM-Maverick2-Single, hours=9(salloc)"
+  echo "9. VM fix mount issue (known for missing space3 mount in VM) - run inside the VM"
   echo "=====================menu-slurm==================="
   
   read -p "Select an option: " option
@@ -102,6 +103,15 @@ function menu-slurm() {
       else
         reserve_hw BM-Maverick2-Single $hours
       fi
+      menu-slurm
+      ;;
+    9)
+      echo "Fixing VM mount issue..."
+      # Add commands to fix the mount issue here
+      run_command sudo lustre_rmmod
+      run_command sudo modprobe lnet
+      run_command sudo lnetctl lnet configure --all
+      run_command sudo mount -a
       menu-slurm
       ;;
     *)
