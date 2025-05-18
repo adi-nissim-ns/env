@@ -71,6 +71,12 @@ function menu-run() {
   echo "10. webserver: run"
   echo "11. webserver: install"
   echo "12. webserver: cleanup (todo)"
+  echo ""
+  echo "================================================"
+  echo "TODO: add support"
+  echo "CS: restart optimizer : nextloader -- /some/path/to/my/app"
+  echo "                        nextloader -- /some/path/to/my/./app"
+  echo " those 2 commands a considered different by the optimizer - so every switch will restart the optimizer"
   echo "=====================menu-run==================="
   
   read -p "Select an option: " option
