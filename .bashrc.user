@@ -101,5 +101,10 @@ if [ "$(hostname)" == "slurm-client01" ]; then
   menu-slurm
 fi
 
+if [ -f ${ENV_DIR}/.bashrc.tmux ]; then
+  source ${ENV_DIR}/.bashrc.tmux
+fi
+
 fix-ps1
 PS1=${PROMPT_COMMAND}
+
