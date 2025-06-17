@@ -2,10 +2,6 @@
 
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
-<<<<<<< Updated upstream
-source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
-=======
-
 source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
 function are_we_in_a_development_host
 {
