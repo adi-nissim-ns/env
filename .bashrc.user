@@ -49,7 +49,6 @@ if ! is_ux_mode; then
   return 0
 fi
 
->>>>>>> Stashed changes
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.user_env_vars
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.funcs
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.main
