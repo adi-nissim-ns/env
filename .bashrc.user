@@ -2,104 +2,165 @@
 
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
+<<<<<<< Updated upstream
 source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
+=======
+
+source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
+function are_we_in_a_development_host
+{
+  # Check if we are in a development host
+  local dev_hosts=("dev-sw04" "dev-sw04.il.nextsilicon.com" "dev-sw05" "dev-sw05.il.nextsilicon.com" "dev-sw02" "dev-sw02.il.nextsilicon.com")
+  local current_host=$(hostname)
+  for host in "${dev_hosts[@]}"; do
+    if [[ "$current_host" == "$host" ]]; then
+      echo_info "We are in a development host: $current_host"
+      return 0  # We are in a development host
+    fi
+  done
+  echo_info "We are not in a development host: $current_host"
+  return 1  # We are not in a development host
+}
+
+function are_we_in_a_slurm_client
+{
+  # Check if we are in a slurm client host
+  local slurm_clients=("slurm-client01" "slurm-client01.il.nextsilicon.com")
+  local current_host=$(hostname)
+  for host in "${slurm_clients[@]}"; do
+    if [[ "$current_host" == "$host" ]]; then
+      echo_info "We are in a slurm client host: $current_host"
+      return 0  # We are in a slurm client host
+    fi
+  done
+  return 1  # We are not in a slurm client host
+}
+
+function is_ux_mode
+{  
+  if are_we_in_a_development_host; then
+    return 0
+  elif are_we_in_a_slurm_client; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# if not UX mode
+if ! is_ux_mode; then
+  echo_info "This script is intended to be run in UX mode only."
+  return 0
+fi
+
+>>>>>>> Stashed changes
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.user_env_vars
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.funcs
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.main
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.slurm
-run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.run
-run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.env
-run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.kokkos
 
-#------------------------------------------------------------------
-# Create directories if they don't exist
-# Create aliases for common commands
-# Create softlinks for conan and cache
-#------------------------------------------------------------------
-env_create_dir ${NEXT_HOME}
-env_create_dir ${SW_HOME}
-env_create_dir ${NEXTUTILS}
-env_create_dir /space3/users/${USER}/.conan2
-env_create_dir /space3/users/${USER}/.ccache
 
-echo ""
-env_create_cd_alias cdenv "$_ENV_PROJECT_DIR"
-env_create_cd_alias cdsw "${SW_HOME}"
-env_create_cd_alias cdnext "${NEXT_HOME}"
-env_create_cd_alias cdutils "${NEXTUTILS}"
-env_create_cd_alias cdkokkos "${SW_HOME}/kokkos"
-
-env_create_alias .. "cd .."
-env_create_alias ... "cd ../.."
-env_create_alias .... "cd ../../.."
-env_create_alias lookfor "grep -rnw . -e " 
-
-create_softlink ${XDG_CACHE_HOME} ~/.cache
-create_softlink /space3/users/${USER}/.conan2 ~/.conan2
-create_softlink /space3/users/${USER}/.ccache ~/.ccache
-
-#------------------------------------------------------------------
-# recomended setup for bashrc
-#------------------------------------------------------------------
-
-if [ "${LMOD_SETUP}" != true ]; then
-  echo_info "Loading Lmod..."
-  run_command_silent source /etc/profile.d/lmod.sh
-  run_command_silent module load GCCcore/12.3.0 Clang/16.0.6 ccache/4.9.1 GDB/13.2 Perl/5.36.1
-  run_command_silent module del OpenSSL
-  export CCACHE_DIR="/space3/users/${USER}/.ccache"
-  export CONAN_HOME="/space3/users/${USER}/.conan2"
-  export LMOD_SETUP=true
+if are_we_in_a_slurm_client; then
+  echo_info "This script is intended to be run on a SLURM client only."
+  return 0
 fi
 
-function are_we_in_a_development_host
-{
-  # Check if we are in a development host
-  local dev_hosts=("dev-sw04" "dev-sw05" "dev-sw02")
-  local current_host=$(hostname)
-  for host in "${dev_hosts[@]}"; do
-    if [[ "$current_host" == "$host" ]]; then
-      return 0  # We are in a development host
-    fi
-  done
-  return 1  # We are not in a development host
-}
-
-# do if we are on a development host
 if are_we_in_a_development_host; then
+  run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.run
+  run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.env
+  run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.kokkos
+
   #------------------------------------------------------------------
-  #  Setup rust environment
+  # Create directories if they don't exist
+  # Create aliases for common commands
+  # Create softlinks for conan and cache
   #------------------------------------------------------------------
+  env_create_dir ${NEXT_HOME}
+  env_create_dir ${SW_HOME}
+  env_create_dir ${NEXTUTILS}
+  env_create_dir /space3/users/${USER}/.conan2
+  env_create_dir /space3/users/${USER}/.ccache
+
   echo ""
-  # Check if rust is installed
-  if [ -d "${CARGO_HOME}" ]; then
-    echo "Rust is already installed."
-  else
-    echo "Rust is not installed. Installing..."
-    setup_rust_env
+  env_create_cd_alias cdenv "$_ENV_PROJECT_DIR"
+  env_create_cd_alias cdsw "${SW_HOME}"
+  env_create_cd_alias cdnext "${NEXT_HOME}"
+  env_create_cd_alias cdutils "${NEXTUTILS}"
+  env_create_cd_alias cdkokkos "${SW_HOME}/kokkos"
+
+  env_create_alias .. "cd .."
+  env_create_alias ... "cd ../.."
+  env_create_alias .... "cd ../../.."
+  env_create_alias lookfor "grep -rnw . -e " 
+
+  create_softlink ${XDG_CACHE_HOME} ~/.cache
+  create_softlink /space3/users/${USER}/.conan2 ~/.conan2
+  create_softlink /space3/users/${USER}/.ccache ~/.ccache
+
+  #------------------------------------------------------------------
+  # recomended setup for bashrc
+  #------------------------------------------------------------------
+
+  if [ "${LMOD_SETUP}" != true ]; then
+    echo_info "Loading Lmod..."
+    run_command_silent source /etc/profile.d/lmod.sh
+    run_command_silent module load GCCcore/12.3.0 Clang/16.0.6 ccache/4.9.1 GDB/13.2 Perl/5.36.1
+    run_command_silent module del OpenSSL
+    export CCACHE_DIR="/space3/users/${USER}/.ccache"
+    export CONAN_HOME="/space3/users/${USER}/.conan2"
+    export LMOD_SETUP=true
   fi
 
-  #------------------------------------------------------------------
-  #  Setup python environment
-  #------------------------------------------------------------------
-  echo ""
+  function are_we_in_a_development_host
+  {
+    # Check if we are in a development host
+    local dev_hosts=("dev-sw04" "dev-sw05" "dev-sw02")
+    local current_host=$(hostname)
+    for host in "${dev_hosts[@]}"; do
+      if [[ "$current_host" == "$host" ]]; then
+        return 0  # We are in a development host
+      fi
+    done
+    return 1  # We are not in a development host
+  }
 
-  # Check if python_venv directory exists
-  if [ -d "${_PY_VENV}" ]; then
-    echo "Python virtual environment already exists at ${_PY_VENV}"
-  else
-    echo "Python virtual environment does not exist. Creating..."
-    setup_python_env
+  # do if we are on a development host
+  if are_we_in_a_development_host; then
+    #------------------------------------------------------------------
+    #  Setup rust environment
+    #------------------------------------------------------------------
+    echo ""
+    # Check if rust is installed
+    if [ -d "${CARGO_HOME}" ]; then
+      echo "Rust is already installed."
+    else
+      echo "Rust is not installed. Installing..."
+      setup_rust_env
+    fi
+
+    #------------------------------------------------------------------
+    #  Setup python environment
+    #------------------------------------------------------------------
+    echo ""
+
+    # Check if python_venv directory exists
+    if [ -d "${_PY_VENV}" ]; then
+      echo "Python virtual environment already exists at ${_PY_VENV}"
+    else
+      echo "Python virtual environment does not exist. Creating..."
+      setup_python_env
+    fi
+  fi  
+
+  # -------------------------------------------------
+  # run: menu-slurm 
+  # -------------------------------------------------
+  # run_command_silent menu-slurm
+  if [ "$(hostname)" == "slurm-client01" ]; then
+    menu-slurm
   fi
-fi  
 
-# -------------------------------------------------
-# run: menu-slurm 
-# -------------------------------------------------
-# run_command_silent menu-slurm
-if [ "$(hostname)" == "slurm-client01" ]; then
-  menu-slurm
-fi
+  fix-ps1
+  PS1=${PROMPT_COMMAND}
 
-fix-ps1
-PS1=${PROMPT_COMMAND}
+fi # if are_we_in_a_development_host  
