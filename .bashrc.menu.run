@@ -27,21 +27,23 @@ function run_nextdaemon {
           ;;
   esac   
 
-  echo_running $NEXT_HOME/bin/nextdaemon $cfg_options
-  $NEXT_HOME/bin/nextdaemon $cfg_options
+  #echo_running $NEXT_HOME/bin/nextdaemon $cfg_options
+  #$NEXT_HOME/bin/nextdaemon $cfg_options
+  echo_running nextsystemd $cfg_options
+  nextsystemd $cfg_options
   if [ $? -ne 0 ]; then
       echo_error "${@}"
       
       # ask the user if they want to continue without a device 
-      read -p "Do you want to continue without a device? (y/n): " choice
-      case "$choice" in
-          y|Y ) 
-              echo "Continuing without a device..."
-              run_command $NEXT_HOME/bin/nextdaemon $cfg_options --allow-no-device
-              ;;
-          * ) 
-              ;;
-      esac
+      #read -p "Do you want to continue without a device? (y/n): " choice
+      #case "$choice" in
+      #    y|Y ) 
+      #        echo "Continuing without a device..."
+      #        run_command $NEXT_HOME/bin/nextdaemon $cfg_options --allow-no-device
+      #        ;;
+      #    * ) 
+      #        ;;
+      #esac
   else
       echo_success "${@}"
   fi
@@ -60,17 +62,19 @@ function menu-run() {
   echo "4.  drivers: load"
   echo "5.  drivers: show (lsmod)"
   echo ""
-  echo "6.  nextdaemon -cfg-file <cfg file> "
+  echo "6. cs:  sudo rm -rf /dev/shm/sys_sync_dev1"
+  echo "7. cs:  nextsystemd --cfg-file <path to cfg file>"
+#  echo "6.  nextdaemon -cfg-file <cfg file> "
   echo ""
-  echo "7.  nextcli: handof: enable"
-  echo "8.  nextcli: handof: disable"
-  echo ""
-  echo "-.  $NEXT_HOME/bin/nextloader --cfg-file <cfg file> -- <exe> <exe_params>"
-  echo "9.  nextcli: runtime status"
-  echo ""
-  echo "10. webserver: run"
-  echo "11. webserver: install"
-  echo "12. webserver: cleanup (todo)"
+#  echo "7.  nextcli: handof: enable"
+#  echo "8.  nextcli: handof: disable"
+#  echo ""
+#  echo "-.  $NEXT_HOME/bin/nextloader --cfg-file <cfg file> -- <exe> <exe_params>"
+#  echo "9.  nextcli: runtime status"
+#  echo ""
+#  echo "10. webserver: run"
+#  echo "11. webserver: install"
+#  echo "12. webserver: cleanup (todo)"
   echo ""
   echo "================================================"
   echo "TODO: add support"
@@ -105,35 +109,39 @@ function menu-run() {
       menu-run        
       ;;
     6)
+      run_command sudo rm -rf /dev/shm/sys_sync_dev1
+      menu-run        
+      ;;
+    7)
       # echo_info which nextdaemon
       run_nextdaemon
       menu-run
       ;;
-    7)
-      run_command $NEXT_HOME/bin/nextcli runtime handoff enable
-      menu-run
-      ;;
-    8)
-      run_command $NEXT_HOME/bin/nextcli runtime handoff disable
-      menu-run
-      ;;
-    9)
-      run_command $NEXT_HOME/bin/nextcli runtime status
-      menu-run
-      ;;      
-    10)
-      run_command nextcli webapps-server
-      menu-run
-      ;;      
-    11)
-      cdutils
-      run_command ./setup.sh --fetch-webapps
-      menu-run
-      ;;
-    12) 
-      webserver_cleanup
-      menu-run
-      ;;
+    #7)
+    #  run_command $NEXT_HOME/bin/nextcli runtime handoff enable
+    #  menu-run
+    #  ;;
+    #8)
+    #  run_command $NEXT_HOME/bin/nextcli runtime handoff disable
+    #  menu-run
+    #  ;;
+    #9)
+    #  run_command $NEXT_HOME/bin/nextcli runtime status
+    #  menu-run
+    #  ;;      
+    #10)
+    #  run_command nextcli webapps-server
+    #  menu-run
+    #  ;;      
+    #11)
+    #  cdutils
+    #  run_command ./setup.sh --fetch-webapps
+    #  menu-run
+    #  ;;
+    #12) 
+    #  webserver_cleanup
+    #  menu-run
+    #  ;;
     *)
       echo "Invalid option. Please try again."
       menu_run
