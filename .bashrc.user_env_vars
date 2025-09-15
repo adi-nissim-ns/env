@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ------------------------------------------------------------------
-# recomended setup for bashrc
+# recommended setup for bashrc
 # ------------------------------------------------------------------
 SHARED_SPACE_NAME=space3
 # SHARED_SPACE_NAME=space2
@@ -15,21 +15,26 @@ echo "Welcome to ${USER} on ${SHARED_SPACE_NAME}!"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     _OS=$ID
-    export CC=clang
-    export CXX=clang++
     export CURL_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.trust.crt
     _ENV=env_${_OS} # supported _ENV=env_rhel/env_debian
 else
     _OS="debian"
-    export CC=clang
-    export CXX=clang++
     _ENV=env_${_OS} # supported _ENV=env_rhel/env_debian
-fi  
+fi
+
+
+export CC=clang
+export CXX=clang++
 
 _ENV_DIR="${_SPACE_DIR}/${_ENV}"
 export NEXT_HOME="${_ENV_DIR}/next_home"
-export SW_HOME="/${SHARED_SPACE_NAME}/users/${USER}/sw"
 export NEXTUTILS="${SW_HOME}/nextutils"
+export SW_HOME="${SPACE_PATH}/sw"
+
+export MPI_HOME="${NEXT_HOME}"
+export OPAL_PREFIX="${NEXT_HOME}"
+export OPAL_DESTDIR="${NEXT_HOME}/sysroot/usr"
+export PRTE_PREFIX="${NEXT_HOME}/sysroot/usr"
 
 #------------------------------------------------------------------
 # Slurm shortcuts:
@@ -45,15 +50,14 @@ export _PY_VENV=${_ENV_DIR}/python_venv
 # FOR VSCode
 # ------------------------------------------------------------------
 shopt -s direxpand
-_BASEDIR=/${SHARED_SPACE_NAME}/users/$USER
+_BASEDIR=${SPACE_PATH}
 _USE_PRIVATE_VENV=true
 
 # export CONAN_USER_HOME=${_ENV_DIR}/conan
-# export CCACHE_DIR=${_ENV_DIR}/ccache
-# export CONAN_HOME="/space3/users/${USER}/.conan2"
+export CONAN_HOME="${SPACE_PATH}/.conan2"
 export XDG_CACHE_HOME=${_BASEDIR}/.cache  # Intellisense cache performance
 
-# export CCACHE_DIR="/space3/users/${USER}/.ccache"
+export CCACHE_DIR="${SPACE_PATH}/.ccache"
 export _NEXTSW_VENV="/tools/common/pkgs/pyenv/debian/versions/3.9.0/envs/sw"
 export _PRIVATE_VENV="${_ENV_DIR}/private_venv/"
 
@@ -80,4 +84,5 @@ export PATH=${NEXT_HOME}/bin:${MPI_PATH}/bin:$PATH
 
 export OMPI_MPICC=nextcc
 export OMPI_MPICXX=nextcxx
-export OMPI_MPIFC=nextflang
+export OMPI_MPIFC=nextflang #nextfort?
+
