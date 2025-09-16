@@ -1,5 +1,6 @@
 #!/bin/bash
 
+_SPACE="space3"
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
 source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
@@ -19,8 +20,8 @@ run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.kokkos
 env_create_dir ${NEXT_HOME}
 env_create_dir ${SW_HOME}
 env_create_dir ${NEXTUTILS}
-env_create_dir /space3/users/${USER}/.conan2
-env_create_dir /space3/users/${USER}/.ccache
+env_create_dir /${_SPACE}/users/${USER}/.conan2
+env_create_dir /${_SPACE}/users/${USER}/.ccache
 
 echo ""
 env_create_cd_alias cdenv "$_ENV_PROJECT_DIR"
@@ -35,8 +36,8 @@ env_create_alias .... "cd ../../.."
 env_create_alias lookfor "grep -rnw . -e " 
 
 create_softlink ${XDG_CACHE_HOME} ~/.cache
-create_softlink /space3/users/${USER}/.conan2 ~/.conan2
-create_softlink /space3/users/${USER}/.ccache ~/.ccache
+create_softlink /${_SPACE}/users/${USER}/.conan2 ~/.conan2
+create_softlink /${_SPACE}/users/${USER}/.ccache ~/.ccache
 
 #------------------------------------------------------------------
 # recomended setup for bashrc
@@ -47,8 +48,8 @@ if [ "${LMOD_SETUP}" != true ]; then
   run_command_silent source /etc/profile.d/lmod.sh
   run_command_silent module load GCCcore/12.3.0 Clang/16.0.6 ccache/4.9.1 GDB/13.2 Perl/5.36.1
   run_command_silent module del OpenSSL
-  export CCACHE_DIR="/space3/users/${USER}/.ccache"
-  export CONAN_HOME="/space3/users/${USER}/.conan2"
+  export CCACHE_DIR="/${_SPACE}/users/${USER}/.ccache"
+  export CONAN_HOME="/${_SPACE}/users/${USER}/.conan2"
   export LMOD_SETUP=true
 fi
 

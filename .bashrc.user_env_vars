@@ -3,11 +3,8 @@
 # ------------------------------------------------------------------
 # recommended setup for bashrc
 # ------------------------------------------------------------------
-SHARED_SPACE_NAME=space3
-# SHARED_SPACE_NAME=space2
-
-SPACE_PATH="/${SHARED_SPACE_NAME}/users/${USER}/"
-echo "Welcome to ${USER} on ${SHARED_SPACE_NAME}!"
+SPACE_PATH="/${_SPACE}/users/${USER}/"
+echo "Welcome to ${USER} on ${_SPACE}!"
 
 [ -z "$PS1" ] && return
   _SPACE_DIR=${SPACE_PATH}
@@ -28,8 +25,8 @@ export CXX=clang++
 
 _ENV_DIR="${_SPACE_DIR}/${_ENV}"
 export NEXT_HOME="${_ENV_DIR}/next_home"
-export NEXTUTILS="${SW_HOME}/nextutils"
 export SW_HOME="${SPACE_PATH}/sw"
+export NEXTUTILS="${SW_HOME}/nextutils"
 
 export MPI_HOME="${NEXT_HOME}"
 export OPAL_PREFIX="${NEXT_HOME}"

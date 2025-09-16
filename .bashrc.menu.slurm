@@ -27,7 +27,7 @@ function menu-slurm() {
   echo "1. Main menu"
   echo "2. step1: ssh to slurm"
   echo "3. step2: get patritions info (sinfo)"
-  echo "4. step3: see already allocated HW resources (squeue)"
+  echo "4. step3: see already allocated HW resources (squeue --me)"
   echo "5. step4: allocate a HW resource in partition=cloud, hours=9(salloc)"
   echo "6. step4: allocate bare metal HW resource in partition=BM-Maverick2-Single, hours=9(salloc)" 
   echo "7. step4: reserve a HW resource in partition=cloud, hours=9(salloc)"
@@ -53,7 +53,7 @@ function menu-slurm() {
       menu-slurm
       ;;
     4)
-      run_command squeue
+      run_command "squeue --me"
       menu-slurm
       ;;
     5)

@@ -105,7 +105,7 @@ function menu-run() {
       menu-run
       ;;
     5)
-      run_command lsmod
+      run_command "lsmod | grep next"
       menu-run        
       ;;
     6)
