@@ -28,8 +28,8 @@ export CXX=clang++
 
 _ENV_DIR="${_SPACE_DIR}/${_ENV}"
 export NEXT_HOME="${_ENV_DIR}/next_home"
-export NEXTUTILS="${SW_HOME}/nextutils"
 export SW_HOME="${SPACE_PATH}/sw"
+export NEXTUTILS="${SW_HOME}/nextutils"
 
 export MPI_HOME="${NEXT_HOME}"
 export OPAL_PREFIX="${NEXT_HOME}"
