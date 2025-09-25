@@ -1,6 +1,15 @@
 #!/bin/bash
 
-_SPACE="space3"
+# read space parameter from command line/system variable and set default if not provided
+if [ -n "$1" ]; then
+  _SPACE="$1"
+elif [ -n "$NEXT_USER_SPACE" ]; then
+  _SPACE="$NEXT_USER_SPACE"
+else
+  _SPACE="space3"
+fi
+export NEXT_USER_SPACE=${_SPACE}
+
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
 source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
