@@ -49,6 +49,29 @@ function run_nextdaemon {
   fi
 }
 
+cleanup() {
+    pkill -9 nextdaemon
+    pkill -9 nextloader
+    pkill -9 nextruntimed
+    pkill -9 nextsystemd
+    pkill -9 nsopt
+    pkill -9 nextoptd
+    pkill -9 elrond
+    pkill -9 nextrunner
+    pkill -9 python
+    pkill -9 python3
+    pkill -9 influxdb
+    pkill -9 tools-api
+    pkill -9 collector
+    if [ -d "/coredumps" ] && [ "$(ls -A /coredumps)" ]; then
+      sudo rm /coredumps/*
+    fi
+
+    if [ -d "/dev/shm/sys_sync_dev1" ] && [ "$(ls -A /dev/shm/sys_sync_dev1)" ]; then
+      sudo rm /dev/shm/sys_sync_dev1
+    fi
+}
+
 function menu-run() {
   echo ""
   echo "====================menu-run===================="
@@ -64,6 +87,7 @@ function menu-run() {
   echo ""
   echo "6. cs:  sudo rm -rf /dev/shm/sys_sync_dev1"
   echo "7. cs:  nextsystemd --cfg-file <path to cfg file>"
+  echo "8. cs:  cleanup (to run before nextsystemd)"
 #  echo "6.  nextdaemon -cfg-file <cfg file> "
   echo ""
 #  echo "7.  nextcli: handof: enable"
@@ -93,14 +117,17 @@ function menu-run() {
       menu 
       ;;
     2)
+      echo_info "** run_func: reload-drv"
       reload-drv
       menu-run
       ;;
     3)
+      echo_info "** run_func: unload-drv"
       unload-drv
       menu-run
       ;;
     4)
+      echo_info "** run_func: load-drv"
       load-drv
       menu-run
       ;;
@@ -117,6 +144,11 @@ function menu-run() {
       run_nextdaemon
       menu-run
       ;;
+    8)
+      echo_info "** run_func: cleanup"
+      cleanup
+      menu-run
+      ;;    
     #7)
     #  run_command $NEXT_HOME/bin/nextcli runtime handoff enable
     #  menu-run
