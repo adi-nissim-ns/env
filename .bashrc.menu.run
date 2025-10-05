@@ -6,7 +6,7 @@ function webserver_cleanup {
   echo_error " TODO: add this" 
 }
 
-function run_nextdaemon {
+function run_nextsystemd {
   # ask the user if they want to continue with default cfg file
   read -p "Do you want to continue with the default cfg file? (y/n): " choice
   case "$choice" in
@@ -88,17 +88,7 @@ function menu-run() {
   echo "6. cs:  sudo rm -rf /dev/shm/sys_sync_dev1"
   echo "7. cs:  nextsystemd --cfg-file <path to cfg file>"
   echo "8. cs:  cleanup (to run before nextsystemd)"
-#  echo "6.  nextdaemon -cfg-file <cfg file> "
-  echo ""
-#  echo "7.  nextcli: handof: enable"
-#  echo "8.  nextcli: handof: disable"
-#  echo ""
-#  echo "-.  $NEXT_HOME/bin/nextloader --cfg-file <cfg file> -- <exe> <exe_params>"
-#  echo "9.  nextcli: runtime status"
-#  echo ""
-#  echo "10. webserver: run"
-#  echo "11. webserver: install"
-#  echo "12. webserver: cleanup (todo)"
+  echo "9. cs:  warm reset (./build/bin/sys_mng_tools --device-id 1 warm-reset) - reset while keeping the VM allocated"
   echo ""
   echo "================================================"
   echo "TODO: add support"
@@ -141,7 +131,7 @@ function menu-run() {
       ;;
     7)
       # echo_info which nextdaemon
-      run_nextdaemon
+      run_nextsystemd
       menu-run
       ;;
     8)
@@ -149,6 +139,34 @@ function menu-run() {
       cleanup
       menu-run
       ;;    
+    9)
+      echo_info "** run_func: warm reset"
+      run_command ./build/bin/sys_mng_tools --device-id 1 warm-reset
+      menu-run
+      ;;
+    *)
+      echo "Invalid option. Please try again."
+      menu_run
+      ;;
+  esac
+}
+
+echo_info "Loading menu-run ..."
+
+
+#---------------------------------------------------------
+# old options from es
+#---------------------------------------------------------
+#  echo "6.  nextdaemon -cfg-file <cfg file> "
+#  echo "7.  nextcli: handof: enable"
+#  echo "8.  nextcli: handof: disable"
+#  echo ""
+#  echo "-.  $NEXT_HOME/bin/nextloader --cfg-file <cfg file> -- <exe> <exe_params>"
+#  echo "9.  nextcli: runtime status"
+#  echo ""
+#  echo "10. webserver: run"
+#  echo "11. webserver: install"
+#  echo "12. webserver: cleanup (todo)"
     #7)
     #  run_command $NEXT_HOME/bin/nextcli runtime handoff enable
     #  menu-run
@@ -174,11 +192,3 @@ function menu-run() {
     #  webserver_cleanup
     #  menu-run
     #  ;;
-    *)
-      echo "Invalid option. Please try again."
-      menu_run
-      ;;
-  esac
-}
-
-echo_info "Loading menu-run ..."
