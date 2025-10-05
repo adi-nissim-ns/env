@@ -1,0 +1,24 @@
+{
+    "folders": [
+        {
+            "path": ".."
+        },
+        {
+            "name": "env",
+            "path": "../env"
+        }
+    ],
+    "settings": {
+        "terminal.integrated.scrollback": 10000,
+        "terminal.integrated.mouseWheelScrollsSensitivity": 1,
+        "terminal.integrated.fastScrollSensitivity": 5,
+        "terminal.integrated.scrollToBottomOnInput": false,
+        "terminal.integrated.enableMultiLinePasteWarning": false,
+        "terminal.integrated.rightClickBehavior": "default",
+        "terminal.integrated.copyOnSelection": false,
+        "files.autoSave": "onFocusChange",
+		"files.trimTrailingWhitespace": true,
+		"files.trimFinalNewlines": true,
+		"files.insertFinalNewline": true
+    }
+}
