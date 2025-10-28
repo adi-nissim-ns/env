@@ -35,6 +35,8 @@ env_create_alias ... "cd ../.."
 env_create_alias .... "cd ../../.."
 env_create_alias lookfor "grep -rnw . -e " 
 
+alias vact='source .venv/bin/activate'
+
 create_softlink ${XDG_CACHE_HOME} ~/.cache
 create_softlink /${_SPACE}/users/${USER}/.conan2 ~/.conan2
 create_softlink /${_SPACE}/users/${USER}/.ccache ~/.ccache
@@ -44,13 +46,13 @@ create_softlink /${_SPACE}/users/${USER}/.ccache ~/.ccache
 #------------------------------------------------------------------
 
 if [ "${LMOD_SETUP}" != true ]; then
-  echo_info "Loading Lmod..."
-  run_command_silent source /etc/profile.d/lmod.sh
-  run_command_silent module load GCCcore/12.3.0 Clang/16.0.6 ccache/4.9.1 GDB/13.2 Perl/5.36.1
-  run_command_silent module del OpenSSL
+  echo_info "Setting cache dir and conan home directories variables"
+#  run_command_silent source /etc/profile.d/lmod.sh
+#  run_command_silent module load GCCcore/12.3.0 Clang/16.0.6 ccache/4.9.1 GDB/13.2 Perl/5.36.1
+#  run_command_silent module del OpenSSL
   export CCACHE_DIR="/${_SPACE}/users/${USER}/.ccache"
   export CONAN_HOME="/${_SPACE}/users/${USER}/.conan2"
-  export LMOD_SETUP=true
+#  export LMOD_SETUP=true
 fi
 
 function are_we_in_a_development_host

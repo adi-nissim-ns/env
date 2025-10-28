@@ -27,6 +27,7 @@ _ENV_DIR="${_SPACE_DIR}/${_ENV}"
 export NEXT_HOME="${_ENV_DIR}/next_home"
 export SW_HOME="${SPACE_PATH}/sw"
 export NEXTUTILS="${SW_HOME}/nextutils"
+export ENV_RUNNER="${NEXTUTILS}/build/global_tests_venv/bin"
 
 export MPI_HOME="${NEXT_HOME}"
 export OPAL_PREFIX="${NEXT_HOME}"
