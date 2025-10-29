@@ -10,11 +10,7 @@ function run_nextsystemd {
   # ask the user if they want to continue with default cfg file
   read -p "Do you want to continue with the default cfg file? (y/n): " choice
   case "$choice" in
-      y|Y ) 
-          echo "Continuing with default cfg file..."
-          cfg_options=""
-          ;;
-      * ) 
+      n|N ) 
           # get from user a cfg file   
           echo_info "Please enter the path to the cfg file: "
           read cfg_file
@@ -25,6 +21,11 @@ function run_nextsystemd {
               cfg_options="--cfg-file $cfg_file"           
           fi          
           ;;
+      * ) 
+          echo "Continuing with default cfg file..."
+          cfg_options=""
+          ;;
+
   esac   
 
   #echo_running $NEXT_HOME/bin/nextdaemon $cfg_options
