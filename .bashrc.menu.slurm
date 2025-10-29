@@ -32,7 +32,7 @@ function menu-slurm() {
   echo "6. step4: allocate bare metal HW resource in partition=BM-Maverick2-Single, hours=9(salloc)" 
   echo "7. step4: reserve a HW resource in partition=cloud, hours=9(salloc)"
   echo "8. step4: reserve bare metal HW resource in partition=BM-Maverick2-Single, hours=9(salloc)"
-  echo "9. VM fix mount issue (known for missing space3 mount in VM) - run inside the VM"
+  echo "9. VM fix mount issue (known for missing ${SHARED_SPACE_NAME} mount in VM) - run inside the VM"
   echo "=====================menu-slurm==================="
   
   read -p "Select an option: " option
