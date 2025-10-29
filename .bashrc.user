@@ -5,6 +5,16 @@ if [[ $- != *i* ]]; then
   return 0 # return if not interactive mode
 else
   echo "*** Interactive mode ***"
+
+  read -p "do you want development environment? (y (dev)/n (vanilla)): " choice
+  case "$choice" in
+      n|N ) 
+          return 0       
+          ;;
+      * ) 
+          echo "Development environment selected."
+          ;;
+  esac   
 fi
 
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
@@ -94,6 +104,8 @@ create_softlink_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.ccache ~/.cca
 #------------------------------------------------------------------
 # recomended setup for bashrc
 #------------------------------------------------------------------
+
+
 
 if [ "${LMOD_SETUP}" != true ]; then
   echo_info "Loading Lmod..."
