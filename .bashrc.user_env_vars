@@ -8,6 +8,13 @@ SHARED_SPACE_NAME=space3
 # SHARED_SPACE_NAME=space2
 
 SPACE_PATH="/${SHARED_SPACE_NAME}/users/${USER}/"
+
+# check if dir ${SHARED_SPACE_NAME} 
+if [ ! -d "/${SHARED_SPACE_NAME}" ]; then
+  echo "Directory /${SHARED_SPACE_NAME} does not exist. Please check if the shared space is mounted."
+  return 1
+fi
+
 echo "Welcome to ${USER} on ${SHARED_SPACE_NAME}!"
 
 [ -z "$PS1" ] && return

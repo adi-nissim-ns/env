@@ -3,10 +3,41 @@
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
 source ${_ENV_PROJECT_DIR}/.bashrc.basic_funcs
-run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.user_env_vars
+
+#------------------------------------------------------------------
+# run: menu-slurm 
+#------------------------------------------------------------------
+# run_command_silent menu-slurm
+if [ "$(hostname)" == "slurm-client01" ]; then
+  run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.slurm
+  run_command menu-slurm
+fi
+
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.funcs
+
+#------------------------------------------------------------------
+# run: user_env_vars
+#------------------------------------------------------------------
+run_command source ${_ENV_PROJECT_DIR}/.bashrc.user_env_vars || return 1
+
+#------------------------------------------------------------------
+# Create aliases for common commands
+#------------------------------------------------------------------
+echo ""
+env_create_alias .. "cd .."
+env_create_alias ... "cd ../.."
+env_create_alias .... "cd ../../.."
+env_create_alias lookfor "grep -rnw . -e " 
+env_create_cd_alias cdenv "$_ENV_PROJECT_DIR"
+env_create_cd_alias cdsw "${SW_HOME}"
+env_create_cd_alias cdnext "${NEXT_HOME}"
+env_create_cd_alias cdutils "${NEXTUTILS}"
+env_create_cd_alias cdkokkos "${SW_HOME}/kokkos"
+
+#------------------------------------------------------------------
+# create menu shortcuts
+#------------------------------------------------------------------
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.main
-run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.slurm
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.run
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.env
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.kokkos
@@ -16,28 +47,43 @@ run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.kokkos
 # Create aliases for common commands
 # Create softlinks for conan and cache
 #------------------------------------------------------------------
-env_create_dir ${NEXT_HOME}
-env_create_dir ${SW_HOME}
-env_create_dir ${NEXTUTILS}
-env_create_dir /${SHARED_SPACE_NAME}/users/${USER}/.conan2
-env_create_dir /${SHARED_SPACE_NAME}/users/${USER}/.ccache
 
-echo ""
-env_create_cd_alias cdenv "$_ENV_PROJECT_DIR"
-env_create_cd_alias cdsw "${SW_HOME}"
-env_create_cd_alias cdnext "${NEXT_HOME}"
-env_create_cd_alias cdutils "${NEXTUTILS}"
-env_create_cd_alias cdkokkos "${SW_HOME}/kokkos"
+function create_dir_if_not_exists() {
+  local dir=$1
+  if [ ! -d "${dir}" ]; then
+    read -p "Directory ${dir} does not exist. Do you want to create it? (y/n) " create_dir
+    if [ "$create_dir" == "y" ]; then
+      env_create_dir ${dir}
+    else
+      echo "Directory ${dir} does not exist. Do nothing."
+      return 1
+    fi
+  fi
+}
 
-env_create_alias .. "cd .."
-env_create_alias ... "cd ../.."
-env_create_alias .... "cd ../../.."
-env_create_alias lookfor "grep -rnw . -e " 
+create_dir_if_not_exists ${NEXT_HOME}
+create_dir_if_not_exists ${SW_HOME}
+create_dir_if_not_exists ${NEXTUTILS}
+create_dir_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.conan2
+create_dir_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.ccache
 
-create_softlink ${XDG_CACHE_HOME} ~/.cache
-create_softlink /${SHARED_SPACE_NAME}/users/${USER}/.conan2 ~/.conan2
-create_softlink /${SHARED_SPACE_NAME}/users/${USER}/.ccache ~/.ccache
+function create_softlink_if_not_exists() {
+  local target=$1
+  local link=$2
+  if [ ! -L "${link}" ]; then
+    read -p "Softlink ${link} does not exist. Do you want to create it? (y/n) " create_softlink
+    if [ "$create_softlink" == "y" ]; then
+      create_softlink ${target} ${link}
+    else
+      echo "Softlink ${link} does not exist. Do nothing."
+      return 1
+    fi
+  fi
+} 
 
+create_softlink_if_not_exists ${XDG_CACHE_HOME} ~/.cache
+create_softlink_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.conan2 ~/.conan2
+create_softlink_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.ccache ~/.ccache
 #------------------------------------------------------------------
 # recomended setup for bashrc
 #------------------------------------------------------------------
@@ -55,7 +101,7 @@ fi
 function are_we_in_a_development_host
 {
   # Check if we are in a development host
-  local dev_hosts=("dev-sw04" "dev-sw05" "dev-sw02")
+  local dev_hosts=("dev-sw04" "dev-sw05" "dev-sw02" "dev-sw07")
   local current_host=$(hostname)
   for host in "${dev_hosts[@]}"; do
     if [[ "$current_host" == "$host" ]]; then
@@ -93,18 +139,9 @@ if are_we_in_a_development_host; then
   fi
 fi  
 
-# -------------------------------------------------
-# run: menu-slurm 
-# -------------------------------------------------
-# run_command_silent menu-slurm
-if [ "$(hostname)" == "slurm-client01" ]; then
-  menu-slurm
-fi
-
 if [ -f ${ENV_DIR}/.bashrc.tmux ]; then
   source ${ENV_DIR}/.bashrc.tmux
 fi
 
 fix-ps1
 PS1=${PROMPT_COMMAND}
-
