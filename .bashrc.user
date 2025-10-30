@@ -54,6 +54,7 @@ env_create_cd_alias cdsw "${SW_HOME}"
 env_create_cd_alias cdnext "${NEXT_HOME}"
 env_create_cd_alias cdutils "${NEXTUTILS}"
 env_create_cd_alias cdkokkos "${SW_HOME}/kokkos"
+env_create_cd_alias cdnextblas "${SW_HOME}/nextblas"
 
 #------------------------------------------------------------------
 # create menu shortcuts
