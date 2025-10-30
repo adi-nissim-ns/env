@@ -85,7 +85,6 @@ function create_dir_if_not_exists() {
 
 create_dir_if_not_exists ${NEXT_HOME}
 create_dir_if_not_exists ${SW_HOME}
-create_dir_if_not_exists ${NEXTUTILS}
 create_dir_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.conan2
 create_dir_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.ccache
 
