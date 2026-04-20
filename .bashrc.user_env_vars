@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------
 # recomended setup for bashrc
 # ------------------------------------------------------------------
-#SHARED_SPACE_NAME=space4
+# SHARED_SPACE_NAME=space4
 SHARED_SPACE_NAME=space3
 # SHARED_SPACE_NAME=space2
 
