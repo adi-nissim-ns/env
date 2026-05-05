@@ -73,6 +73,121 @@ cleanup() {
     fi
 }
 
+function run_nextloader {
+    local cmd="$*"
+
+    local first_word
+    first_word=$(echo "$cmd" | awk '{print $1}')
+
+    if [[ "$first_word" != "nextloader" ]]; then
+        echo_error "Command must start with 'nextloader'. Got: '${YELLOW}$first_word${NC}'"
+        return 1
+    fi
+
+    local cfg_file=""
+    local args=($cmd)
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[$i]}" == "--cfg-file" ]]; then
+            cfg_file="${args[$i+1]}"
+            break
+        fi
+    done
+
+    echo ""
+    echo -e "${bldcyn}┌─────────────────────────────────────────┐${NC}"
+    echo -e "${bldcyn}│            COMMAND TO RUN               │${NC}"
+    echo -e "${bldcyn}└─────────────────────────────────────────┘${NC}"
+    echo -e "  ${bldylw}▶ $cmd${NC}"
+    echo ""
+
+    if [[ -n "$cfg_file" ]]; then
+        if [[ ! -f "$cfg_file" ]]; then
+            echo_error "Configuration file not found: $cfg_file"
+            return 1
+        fi
+        echo_info "Configuration file: $cfg_file"
+        echo -e "${CYAN}── Config (first 50 lines) ─────────────────────────────────────${NC}"
+        head -n 50 "$cfg_file"
+        echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+        echo ""
+    fi
+
+    local exe=""
+    local found_sep=0
+    for word in $cmd; do
+        if [[ $found_sep -eq 1 ]]; then exe="$word"; break; fi
+        [[ "$word" == "--" ]] && found_sep=1
+    done
+    local exe_abs
+    exe_abs=$(realpath "$exe" 2>/dev/null || echo "$exe")
+
+    local status_json opt_state current_app
+    status_json=$(nextcli --json application status 2>/dev/null)
+    opt_state=$(echo "$status_json" | jq -r '.opt_state // ""' 2>/dev/null)
+    current_app=$(echo "$status_json" | jq -r '.application // ""' 2>/dev/null)
+
+    if [[ "$current_app" == "$exe_abs" && ( "$opt_state" == "IMPROVED" || "$opt_state" == "OPTIMIZED" || "$opt_state" == "COMPLETED" ) ]]; then
+        echo_info "Already optimized (state: ${GREEN}$opt_state${NC}) — skipping CPU run."
+        echo ""
+    else
+        echo_warning "⚙  NOTICE: Running on CPU — performance may vary."
+        echo ""
+
+        echo -e "${CYAN}── Output ──────────────────────────────────────────────────────${NC}"
+        eval "$cmd"
+        local exit_code=$?
+        echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+        echo ""
+
+        if [[ $exit_code -eq 0 ]]; then
+            echo_success "Command succeeded (exit code: 0)"
+        else
+            echo_error "Command failed (exit code: $exit_code)"
+        fi
+        echo ""
+
+        echo_warning "⏳ Waiting for optimization to complete..."
+        echo ""
+
+        until nextcli application status 2>&1 | grep -q "OPTIMIZED\|IMPROVED\|Optimization state: READY\|Optimization state: COMPLETED"; do
+            local STATUS RUNNING COMPLETED
+            STATUS=$(nextcli application status 2>&1)
+            RUNNING=$(echo "$STATUS" | grep "Running:" | awk '{print $2}')
+            COMPLETED=$(echo "$STATUS" | grep "Completed:" | awk '{print $2}')
+            echo -e "  ${CYAN}[$(date '+%H:%M:%S')]${NC} Optimizing — Running: ${YELLOW}$RUNNING${NC}, Completed: ${GREEN}$COMPLETED${NC}"
+            sleep 5
+        done
+
+        echo_success "[$(date '+%H:%M:%S')] Done!"
+        echo ""
+        nextcli application status 2>&1
+        echo ""
+    fi
+
+    echo -e "${bldcyn}┌─────────────────────────────────────────┐${NC}"
+    echo -e "${bldcyn}│         RUNNING ON THE DEVICE           │${NC}"
+    echo -e "${bldcyn}└─────────────────────────────────────────┘${NC}"
+    echo_success "🚀  NOTICE: Now running on the Device"
+    echo ""
+    echo -e "  ${bldylw}▶ $cmd${NC}"
+    echo ""
+
+    echo -e "${CYAN}── Output ──────────────────────────────────────────────────────${NC}"
+    eval "$cmd"
+    local device_exit_code=$?
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+    echo ""
+
+    if [[ $device_exit_code -eq 0 ]]; then
+        echo_success "Device run succeeded (exit code: 0)"
+    else
+        echo_error "Device run failed (exit code: $device_exit_code)"
+    fi
+    echo ""
+
+    return $device_exit_code
+}
+
 function menu-run() {
   echo ""
   echo "====================menu-run===================="
@@ -91,12 +206,9 @@ function menu-run() {
   echo "8. cs:  cleanup (to run before nextsystemd)"
   echo "9. cs:  warm reset (./build/bin/sys_mng_tools --device-id 1 warm-reset) - reset while keeping the VM allocated"
   echo ""
+  echo "10. nextloader: run nextloader command (CPU → wait for optimization → Device)"
+  echo ""
   echo "================================================"
-  echo "TODO: add support"
-  echo "CS: restart optimizer : nextloader -- /some/path/to/my/app"
-  echo "                        nextloader -- /some/path/to/my/./app"
-  echo " those 2 commands a considered different by the optimizer - so every switch will restart the optimizer"
-  echo "=====================menu-run==================="
   
   read -p "Select an option: " option
   case $option in
@@ -143,6 +255,12 @@ function menu-run() {
     9)
       echo_info "** run_func: warm reset"
       run_command ./build/bin/sys_mng_tools --device-id 1 warm-reset
+      menu-run
+      ;;
+    10)
+      echo_info "Enter the full nextloader command:"
+      read -r nl_cmd
+      run_nextloader $nl_cmd
       menu-run
       ;;
     *)
