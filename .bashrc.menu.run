@@ -207,6 +207,7 @@ function menu-run() {
   echo "9. cs:  warm reset (./build/bin/sys_mng_tools --device-id 1 warm-reset) - reset while keeping the VM allocated"
   echo ""
   echo "10. nextloader: run nextloader command (CPU → wait for optimization → Device)"
+  echo "11. nextcli:    clear optimization state for current application"
   echo ""
   echo "================================================"
   
@@ -261,6 +262,10 @@ function menu-run() {
       echo_info "Enter the full nextloader command:"
       read -r nl_cmd
       run_nextloader $nl_cmd
+      menu-run
+      ;;
+    11)
+      run_command nextcli application clear
       menu-run
       ;;
     *)
