@@ -22,6 +22,16 @@ BASHRC="${HOME}/.bashrc.${USER}"
 # Optional: export ARTIFACTORY_API_KEY for authenticated access
 API_KEY="${ARTIFACTORY_API_KEY:-}"
 
+# ── Colors (only if stdout is a terminal) ─────────────────────────────────────
+if [[ -t 1 ]]; then
+    YELLOW=$'\033[1;33m'
+    GREEN=$'\033[1;32m'
+    RED=$'\033[1;31m'
+    NC=$'\033[0m'
+else
+    YELLOW=""; GREEN=""; RED=""; NC=""
+fi
+
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 _curl() {
     local -a args=(-sf)
@@ -231,7 +241,7 @@ _install() {
     echo "  and Fortran interfaces). If you are developing a custom build of either"
     echo "  library, skip this — swkit's copies may conflict with your local build."
     echo "  For all other users, installing the libraries is recommended."
-    read -rp "  Install NextSilicon libraries? [y/N]: " lib_ans
+    read -rp "${GREEN}  Install NextSilicon libraries? [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" lib_ans
     [[ "$lib_ans" =~ ^[Yy]$ ]] && lib_arg=""
 
     local clear_ans clear_opt=1
@@ -240,7 +250,7 @@ _install() {
     echo "  before the fresh install. Recommended when downgrading swkit (old files may"
     echo "  otherwise linger) or when switching from a with-libraries to a"
     echo "  without-libraries install. Safe to skip only on a first-time install."
-    read -rp "  Clear /opt/nextsilicon before install? [Y/n]: " clear_ans
+    read -rp "${GREEN}  Clear /opt/nextsilicon before install? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" clear_ans
     [[ "$clear_ans" =~ ^[Nn]$ ]] && clear_opt=0
 
     local bashrc_ans update_bashrc=0
@@ -250,7 +260,7 @@ _install() {
     echo "  Choosing Y updates your ~/.bashrc.USER to source swkit's environment and"
     echo "  exports NEXT_HOME immediately so the change takes effect in the current shell."
     echo "  Choose N to keep using your custom build."
-    read -rp "  Update ${BASHRC} to activate swkit? [Y/n]: " bashrc_ans
+    read -rp "${GREEN}  Update ${BASHRC} to activate swkit? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" bashrc_ans
     [[ "$bashrc_ans" =~ ^[Nn]$ ]] || update_bashrc=1
     echo ""
 
@@ -292,7 +302,7 @@ _install() {
 # ── UI helpers ─────────────────────────────────────────────────────────────────
 _confirm() {
     local ans
-    read -rp "$1 [y/N]: " ans
+    read -rp "${GREEN}$1 [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" ans
     [[ "$ans" =~ ^[Yy]$ ]]
 }
 
@@ -423,7 +433,7 @@ _flow_select() {
     echo ""
 
     local vsel
-    read -rp "Select version (0 to cancel): " vsel
+    read -rp "${GREEN}Select version (0 to cancel): ${NC}" vsel
     [[ "$vsel" == "0" ]] && { echo "Cancelled."; return 0; }
     if ! [[ "$vsel" =~ ^[0-9]+$ ]] || [[ "$vsel" -lt 1 ]] || [[ "$vsel" -gt "${#V_VERSIONS[@]}" ]]; then
         echo "Invalid selection."
@@ -476,7 +486,7 @@ _flow_select() {
     echo ""
 
     local fsel
-    read -rp "Select kit (0 to cancel): " fsel
+    read -rp "${GREEN}Select kit (0 to cancel): ${NC}" fsel
     [[ "$fsel" == "0" ]] && { echo "Cancelled."; return 0; }
     if ! [[ "$fsel" =~ ^[0-9]+$ ]] || [[ "$fsel" -lt 1 ]] || [[ "$fsel" -gt "${#F_FILES[@]}" ]]; then
         echo "Invalid selection."
@@ -550,16 +560,16 @@ main() {
     [[ -n "$stable_rc_label" ]] && s2="last stable RC   (${stable_rc_label})"
     [[ -n "$latest_label" ]]    && s3="last kit         (${latest_label})"
 
-    echo "  1) Install ${s1}  [default]"
-    echo "  2) Install ${s2}"
-    echo "  3) Install ${s3}"
-    echo "  4) List available kits and select"
-    echo "  5) Clear swkit"
-    echo "  6) Exit"
+    echo "${GREEN}  1) Install ${s1}  [default]${NC}"
+    echo "${GREEN}  2) Install ${s2}${NC}"
+    echo "${GREEN}  3) Install ${s3}${NC}"
+    echo "${GREEN}  4) List available kits and select${NC}"
+    echo "${GREEN}  5) Clear swkit${NC}"
+    echo "${GREEN}  6) Exit${NC}"
     echo ""
 
     local choice
-    read -rp "Enter choice [1]: " choice
+    read -rp "${GREEN}Enter choice [${GREEN}1${GREEN}]: ${NC}" choice
     choice="${choice:-1}"
     echo ""
 
