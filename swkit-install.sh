@@ -227,14 +227,29 @@ _install() {
 
     # Ask all options up front before any downloading
     local lib_ans lib_arg="--no-nextsilicon-libs"
+    echo "  swkit includes two compute libraries: nextfft and nextblas (C++ with C"
+    echo "  and Fortran interfaces). If you are developing a custom build of either"
+    echo "  library, skip this — swkit's copies may conflict with your local build."
+    echo "  For all other users, installing the libraries is recommended."
     read -rp "  Install NextSilicon libraries? [y/N]: " lib_ans
     [[ "$lib_ans" =~ ^[Yy]$ ]] && lib_arg=""
 
-    local clear_ans clear_opt=0
-    read -rp "  Clear /opt/nextsilicon before install? [y/N]: " clear_ans
-    [[ "$clear_ans" =~ ^[Yy]$ ]] && clear_opt=1
+    local clear_ans clear_opt=1
+    echo ""
+    echo "  Clearing removes existing swkit packages, DKMS modules, and /opt/nextsilicon"
+    echo "  before the fresh install. Recommended when downgrading swkit (old files may"
+    echo "  otherwise linger) or when switching from a with-libraries to a"
+    echo "  without-libraries install. Safe to skip only on a first-time install."
+    read -rp "  Clear /opt/nextsilicon before install? [Y/n]: " clear_ans
+    [[ "$clear_ans" =~ ^[Nn]$ ]] && clear_opt=0
 
     local bashrc_ans update_bashrc=0
+    echo ""
+    echo "  swkit always installs into /opt/nextsilicon. If you maintain a custom-built"
+    echo "  nextutils stack, your NEXT_HOME may currently point to that location instead."
+    echo "  Choosing Y updates your ~/.bashrc.USER to source swkit's environment and"
+    echo "  exports NEXT_HOME immediately so the change takes effect in the current shell."
+    echo "  Choose N to keep using your custom build."
     read -rp "  Update ${BASHRC} to activate swkit? [Y/n]: " bashrc_ans
     [[ "$bashrc_ans" =~ ^[Nn]$ ]] || update_bashrc=1
     echo ""
@@ -242,7 +257,7 @@ _install() {
     local dl_url="${ARTIFACTORY_HOST}/artifactory/${REPO}/${BASE_PATH}/${channel}/${OS_KEY}/${version}/${filename}"
     local tmpdir
     tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' RETURN
+    trap '[[ -n "${tmpdir:-}" ]] && rm -rf "$tmpdir"; trap - RETURN' RETURN
 
     echo "  Downloading..."
     wget -q --show-progress -O "${tmpdir}/${filename}" "$dl_url" \
@@ -265,6 +280,7 @@ _install() {
 
     if [[ $update_bashrc -eq 1 ]]; then
         _update_bashrc
+        export NEXT_HOME=/opt/nextsilicon
         echo ""
         echo "Done! Apply changes in current shell:  source ${BASHRC}"
     else
@@ -278,6 +294,12 @@ _confirm() {
     local ans
     read -rp "$1 [y/N]: " ans
     [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+_offer_clear() {
+    if _confirm "  Clear existing swkit installation?"; then
+        _clear_swkit
+    fi
 }
 
 # ── Flow 1: install last stable ────────────────────────────────────────────────
@@ -297,7 +319,7 @@ _flow_stable() {
             if _confirm "Install?"; then
                 _install "release" "$version" "$filename"
             else
-                echo "Aborted."
+                _offer_clear
             fi
             return 0
         fi
@@ -320,7 +342,7 @@ _flow_stable() {
     if _confirm "Install?"; then
         _install "release" "$version" "$filename"
     else
-        echo "Aborted."
+        _offer_clear
     fi
 }
 
@@ -340,7 +362,7 @@ _flow_stable_rc() {
     if _confirm "Install?"; then
         _install "rc" "$ver" "$filename"
     else
-        echo "Aborted."
+        _offer_clear
     fi
 }
 
@@ -367,7 +389,7 @@ _flow_latest() {
     if _confirm "Install?"; then
         _install "$channel" "$ver" "$filename"
     else
-        echo "Aborted."
+        _offer_clear
     fi
 }
 
@@ -465,7 +487,16 @@ _flow_select() {
     if _confirm "Install ${sel_channel}/${sel_version}/${selected}?"; then
         _install "$sel_channel" "$sel_version" "$selected"
     else
-        echo "Aborted."
+        _offer_clear
+    fi
+}
+
+# ── Flow 5: clear only ────────────────────────────────────────────────────────
+_flow_clear() {
+    if _confirm "Clear existing swkit installation?"; then
+        _clear_swkit
+    else
+        echo "Cancelled."
     fi
 }
 
@@ -523,7 +554,8 @@ main() {
     echo "  2) Install ${s2}"
     echo "  3) Install ${s3}"
     echo "  4) List available kits and select"
-    echo "  5) Exit"
+    echo "  5) Clear swkit"
+    echo "  6) Exit"
     echo ""
 
     local choice
@@ -536,7 +568,8 @@ main() {
         2) _flow_stable_rc  ;;
         3) _flow_latest     ;;
         4) _flow_select     ;;
-        5) echo "Bye."      ;;
+        5) _flow_clear      ;;
+        6) echo "Bye."      ;;
         *) echo "Invalid choice: '${choice}'"; exit 1 ;;
     esac
 }
