@@ -182,3 +182,6 @@ fi
 
 fix-ps1
 PS1=${PROMPT_COMMAND}
+
+# Added by rtk installer
+export PATH="${HOME}/.local/bin:${PATH}"
