@@ -35,7 +35,14 @@ function _history_menu {
         local i=1
         local entries=()
         while IFS= read -r line; do
-            echo -e "  ${CYAN}$i.${NC} $line"
+            if [[ "$line" == *$'\t'* ]]; then
+                local _hdir="${line%%$'\t'*}"
+                local _hrest="${line#*$'\t'}"
+                echo -e "  ${CYAN}$i.${NC} ${MAGENTA}[$_hdir]${NC}"
+                echo -e "      $_hrest"
+            else
+                echo -e "  ${CYAN}$i.${NC} $line"
+            fi
             entries+=("$line")
             ((i++))
         done < "$file"
@@ -163,7 +170,7 @@ function run_nextloader {
         return 1
     fi
 
-    _history_add "$_HISTORY_NEXTLOADER" "$cmd"
+    _history_add "$_HISTORY_NEXTLOADER" "$(pwd)"$'\t'"$cmd"
 
     local cfg_file=""
     local args=($cmd)
@@ -340,13 +347,27 @@ function menu-run() {
       menu-run
       ;;
     10)
+      local nl_dir="" nl_cmd=""
       if _history_menu "$_HISTORY_NEXTLOADER" "nextloader commands"; then
-          nl_cmd="$_history_selection"
+          if [[ "$_history_selection" == *$'\t'* ]]; then
+              nl_dir="${_history_selection%%$'\t'*}"
+              nl_cmd="${_history_selection#*$'\t'}"
+          else
+              nl_cmd="$_history_selection"
+          fi
       else
           echo_info "Enter the full nextloader command:"
           read -r nl_cmd
       fi
-      run_nextloader $nl_cmd
+      if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
+          local _saved_pwd="$PWD"
+          echo_info "Switching to: $nl_dir"
+          cd "$nl_dir"
+          run_nextloader $nl_cmd
+          cd "$_saved_pwd"
+      else
+          run_nextloader $nl_cmd
+      fi
       menu-run
       ;;
     11)
