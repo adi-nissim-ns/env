@@ -2,37 +2,251 @@
 
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
+_HISTORY_MAX=10
+_HISTORY_NEXTSYSTEMD="${_ENV_PROJECT_DIR}/.history_nextsystemd"
+_HISTORY_NEXTLOADER="${_ENV_PROJECT_DIR}/.history_nextloader"
+_NEXTSYSTEMD_PID_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.pid"
+_NEXTSYSTEMD_LOG_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.log"
+
+function _nextsystemd_bg_is_running {
+    [[ ! -f "$_NEXTSYSTEMD_PID_FILE" ]] && return 1
+    local pid
+    pid=$(cat "$_NEXTSYSTEMD_PID_FILE" 2>/dev/null)
+    [[ -z "$pid" ]] && return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+function _nextsystemd_bg_stop {
+    if _nextsystemd_bg_is_running; then
+        local pid
+        pid=$(cat "$_NEXTSYSTEMD_PID_FILE")
+        echo_running "Stopping background nextsystemd (PID: $pid)..."
+        kill "$pid" 2>/dev/null
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            echo_warning "Process still alive, sending SIGKILL..."
+            kill -9 "$pid" 2>/dev/null
+        fi
+        rm -f "$_NEXTSYSTEMD_PID_FILE"
+        echo_success "Stopped"
+    else
+        echo_info "No background nextsystemd is running"
+        rm -f "$_NEXTSYSTEMD_PID_FILE"
+    fi
+}
+
+function _nextsystemd_bg_start {
+    local cfg_file="$1"
+
+    if _nextsystemd_bg_is_running; then
+        local pid
+        pid=$(cat "$_NEXTSYSTEMD_PID_FILE")
+        echo_warning "Background nextsystemd already running (PID: $pid). Killing it..."
+        _nextsystemd_bg_stop
+    fi
+
+    local existing_pids
+    existing_pids=$(pgrep -x nextsystemd 2>/dev/null)
+    if [[ -n "$existing_pids" ]]; then
+        echo_warning "Existing nextsystemd process(es) found (not started by this menu):"
+        ps -p $existing_pids -o pid,user,cmd 2>/dev/null
+        read -p "Kill them and start fresh? (y/n): " kill_choice
+        case "$kill_choice" in
+            y|Y )
+                for p in $existing_pids; do kill "$p" 2>/dev/null; done
+                sleep 2
+                existing_pids=$(pgrep -x nextsystemd 2>/dev/null)
+                if [[ -n "$existing_pids" ]]; then
+                    for p in $existing_pids; do kill -9 "$p" 2>/dev/null; done
+                    sleep 1
+                fi
+                ;;
+            * )
+                echo_error "Aborted; existing nextsystemd would block startup."
+                return 1
+                ;;
+        esac
+    fi
+
+    : > "$_NEXTSYSTEMD_LOG_FILE"
+    if [[ -n "$cfg_file" ]]; then
+        echo_running "Starting nextsystemd --cfg-file $cfg_file in background..."
+        nextsystemd --cfg-file "$cfg_file" > "$_NEXTSYSTEMD_LOG_FILE" 2>&1 &
+    else
+        echo_running "Starting nextsystemd (default cfg) in background..."
+        nextsystemd > "$_NEXTSYSTEMD_LOG_FILE" 2>&1 &
+    fi
+    local pid=$!
+    echo "$pid" > "$_NEXTSYSTEMD_PID_FILE"
+    sleep 2
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo_error "nextsystemd failed to start. Log ($_NEXTSYSTEMD_LOG_FILE):"
+        echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+        cat "$_NEXTSYSTEMD_LOG_FILE"
+        echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+        rm -f "$_NEXTSYSTEMD_PID_FILE"
+        return 1
+    fi
+    echo_success "nextsystemd started (PID: $pid)"
+    echo_info "  log: $_NEXTSYSTEMD_LOG_FILE"
+}
+
+function _nextsystemd_bg_log {
+    if [[ ! -f "$_NEXTSYSTEMD_LOG_FILE" ]]; then
+        echo_warning "No nextsystemd log found at $_NEXTSYSTEMD_LOG_FILE"
+        return 1
+    fi
+    echo -e "${CYAN}── nextsystemd log ($_NEXTSYSTEMD_LOG_FILE) ────────────────────${NC}"
+    cat "$_NEXTSYSTEMD_LOG_FILE"
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+}
+
+function _nextsystemd_print_profiler_link {
+    if [[ ! -f "$_NEXTSYSTEMD_LOG_FILE" ]]; then
+        echo_warning "No nextsystemd log found"
+        return 1
+    fi
+    local link
+    link=$(grep -oE 'http://[^[:space:]]+/nextprofiler[^[:space:]]*' "$_NEXTSYSTEMD_LOG_FILE" 2>/dev/null | head -1)
+    if [[ -z "$link" ]]; then
+        echo_warning "Profiler link not yet available in $_NEXTSYSTEMD_LOG_FILE"
+        return 1
+    fi
+    echo ""
+    echo -e "${bldcyn}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${bldcyn}║                       PROFILER LINK                          ║${NC}"
+    echo -e "${bldcyn}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "  ${bldgrn}🔗  $link${NC}"
+    echo ""
+}
+
+function _history_add {
+    local file="$1"
+    local entry="$2"
+    local tmp
+    tmp=$(mktemp)
+    echo "$entry" > "$tmp"
+    if [[ -f "$file" ]]; then
+        grep -Fxv "$entry" "$file" | head -n $((_HISTORY_MAX - 1)) >> "$tmp"
+    fi
+    mv "$tmp" "$file"
+}
+
+_history_selection=""
+
+function _history_menu {
+    local file="$1"
+    local title="$2"
+    _history_selection=""
+
+    if [[ ! -f "$file" ]] || [[ ! -s "$file" ]]; then
+        return 1
+    fi
+
+    while true; do
+        echo ""
+        echo_info "Recent $title:"
+        local i=1
+        local entries=()
+        while IFS= read -r line; do
+            if [[ "$line" == *$'\t'* ]]; then
+                local _hdir="${line%%$'\t'*}"
+                local _hrest="${line#*$'\t'}"
+                echo -e "  ${CYAN}$i.${NC} ${MAGENTA}[$_hdir]${NC}"
+                echo -e "      $_hrest"
+            else
+                echo -e "  ${CYAN}$i.${NC} $line"
+            fi
+            entries+=("$line")
+            ((i++))
+        done < "$file"
+        echo -e "  ${YELLOW}0.${NC} Enter manually"
+        echo -e "  ${RED}d<num>.${NC} Delete history entry (e.g. d1)"
+        echo ""
+
+        read -p "Selection: " choice
+
+        if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
+            return 1
+        fi
+
+        if [[ "$choice" =~ ^d([0-9]+)$ ]]; then
+            local del_idx="${BASH_REMATCH[1]}"
+            if [[ "$del_idx" -ge 1 && "$del_idx" -le ${#entries[@]} ]]; then
+                local to_del="${entries[$((del_idx-1))]}"
+                local tmp
+                tmp=$(mktemp)
+                grep -Fxv "$to_del" "$file" > "$tmp"
+                mv "$tmp" "$file"
+                echo_success "Removed: $to_del"
+                [[ ! -s "$file" ]] && return 1
+                continue
+            fi
+            echo_error "Invalid delete index"
+            continue
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#entries[@]} ]]; then
+            _history_selection="${entries[$((choice-1))]}"
+            return 0
+        fi
+
+        echo_error "Invalid selection"
+    done
+}
+
 function webserver_cleanup {
   echo_error " TODO: add this" 
 }
 
 function run_nextsystemd {
-  # ask the user if they want to continue with default cfg file
+  local cfg_file=""
+  local cfg_options=""
+  local cfg_dir=""
+  local _saved_pwd="$PWD"
+
   read -p "Do you want to continue with the default cfg file? (y/n): " choice
   case "$choice" in
-      n|N ) 
-          # get from user a cfg file   
-          echo_info "Please enter the path to the cfg file: "
-          read cfg_file
-          if [ ! -f $cfg_file ]; then
-              echo_error "File not found!" 
-              return 1
+      n|N )
+          if _history_menu "$_HISTORY_NEXTSYSTEMD" "cfg files"; then
+              if [[ "$_history_selection" == *$'\t'* ]]; then
+                  cfg_dir="${_history_selection%%$'\t'*}"
+                  cfg_file="${_history_selection#*$'\t'}"
+              else
+                  cfg_file="$_history_selection"
+              fi
           else
-              cfg_options="--cfg-file $cfg_file"           
-          fi          
+              echo_info "Please enter the path to the cfg file: "
+              read cfg_file
+          fi
+
+          if [[ -n "$cfg_dir" && -d "$cfg_dir" ]]; then
+              echo_info "Switching to: $cfg_dir"
+              cd "$cfg_dir"
+          fi
+
+          if [ ! -f "$cfg_file" ]; then
+              echo_error "File not found: $cfg_file"
+              cd "$_saved_pwd"
+              return 1
+          fi
+          _history_add "$_HISTORY_NEXTSYSTEMD" "$(pwd)"$'\t'"$cfg_file"
+          cfg_options="--cfg-file $cfg_file"
           ;;
-      * ) 
+      * )
           echo "Continuing with default cfg file..."
           cfg_options=""
           ;;
 
-  esac   
+  esac
 
   #echo_running $NEXT_HOME/bin/nextdaemon $cfg_options
   #$NEXT_HOME/bin/nextdaemon $cfg_options
   echo_running nextsystemd $cfg_options
   nextsystemd $cfg_options
-  if [ $? -ne 0 ]; then
+  local rc=$?
+  cd "$_saved_pwd"
+  if [ $rc -ne 0 ]; then
       echo_error "${@}"
       
       # ask the user if they want to continue without a device 
@@ -76,13 +290,19 @@ cleanup() {
 function run_nextloader {
     local cmd="$*"
 
-    local first_word
-    first_word=$(echo "$cmd" | awk '{print $1}')
+    local words=($cmd)
+    local idx=0
+    while [[ $idx -lt ${#words[@]} && "${words[$idx]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
+        ((idx++))
+    done
+    local first_word="${words[$idx]:-}"
 
     if [[ "$first_word" != "nextloader" ]]; then
-        echo_error "Command must start with 'nextloader'. Got: '${YELLOW}$first_word${NC}'"
+        echo_error "Command must start with 'nextloader' (env var prefixes like FOO=bar are allowed). Got: '${YELLOW}$first_word${NC}'"
         return 1
     fi
+
+    _history_add "$_HISTORY_NEXTLOADER" "$(pwd)"$'\t'"$cmd"
 
     local cfg_file=""
     local args=($cmd)
@@ -164,6 +384,10 @@ function run_nextloader {
         echo ""
     fi
 
+    if [[ -n "$_NEXTLOADER_POST_OPT_HOOK" ]]; then
+        $_NEXTLOADER_POST_OPT_HOOK
+    fi
+
     echo -e "${bldcyn}┌─────────────────────────────────────────┐${NC}"
     echo -e "${bldcyn}│         RUNNING ON THE DEVICE           │${NC}"
     echo -e "${bldcyn}└─────────────────────────────────────────┘${NC}"
@@ -188,6 +412,48 @@ function run_nextloader {
     return $device_exit_code
 }
 
+function run_pipeline {
+    local nl_dir="" nl_cmd=""
+    if _history_menu "$_HISTORY_NEXTLOADER" "nextloader commands"; then
+        if [[ "$_history_selection" == *$'\t'* ]]; then
+            nl_dir="${_history_selection%%$'\t'*}"
+            nl_cmd="${_history_selection#*$'\t'}"
+        else
+            nl_cmd="$_history_selection"
+        fi
+    else
+        echo_info "Enter the full nextloader command:"
+        read -r nl_cmd
+    fi
+
+    local p12_cfg=""
+    local p12_args=($nl_cmd)
+    for ((i=0; i<${#p12_args[@]}; i++)); do
+        if [[ "${p12_args[$i]}" == "--cfg-file" ]]; then
+            p12_cfg="${p12_args[$i+1]}"
+            break
+        fi
+    done
+
+    if [[ -z "$p12_cfg" ]]; then
+        echo_info "No --cfg-file in command; nextsystemd will use the default cfg."
+    fi
+
+    local _saved_pwd="$PWD"
+    if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
+        echo_info "Switching to: $nl_dir"
+        cd "$nl_dir"
+    fi
+
+    if _nextsystemd_bg_start "$p12_cfg"; then
+        _NEXTLOADER_POST_OPT_HOOK="_nextsystemd_print_profiler_link"
+        run_nextloader $nl_cmd
+        unset _NEXTLOADER_POST_OPT_HOOK
+    fi
+
+    cd "$_saved_pwd"
+}
+
 function menu-run() {
   echo ""
   echo "====================menu-run===================="
@@ -208,6 +474,10 @@ function menu-run() {
   echo ""
   echo "10. nextloader: run nextloader command (CPU → wait for optimization → Device)"
   echo "11. nextcli:    clear optimization state for current application"
+  echo ""
+  echo "12. pipeline:   bg nextsystemd + nextloader + profiler link (uses --cfg-file from history entry)"
+  echo "13. pipeline:   stop background nextsystemd"
+  echo "14. pipeline:   show background nextsystemd log"
   echo ""
   echo "================================================"
   
@@ -259,13 +529,43 @@ function menu-run() {
       menu-run
       ;;
     10)
-      echo_info "Enter the full nextloader command:"
-      read -r nl_cmd
-      run_nextloader $nl_cmd
+      local nl_dir="" nl_cmd=""
+      if _history_menu "$_HISTORY_NEXTLOADER" "nextloader commands"; then
+          if [[ "$_history_selection" == *$'\t'* ]]; then
+              nl_dir="${_history_selection%%$'\t'*}"
+              nl_cmd="${_history_selection#*$'\t'}"
+          else
+              nl_cmd="$_history_selection"
+          fi
+      else
+          echo_info "Enter the full nextloader command:"
+          read -r nl_cmd
+      fi
+      if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
+          local _saved_pwd="$PWD"
+          echo_info "Switching to: $nl_dir"
+          cd "$nl_dir"
+          run_nextloader $nl_cmd
+          cd "$_saved_pwd"
+      else
+          run_nextloader $nl_cmd
+      fi
       menu-run
       ;;
     11)
       run_command nextcli application clear
+      menu-run
+      ;;
+    12)
+      run_pipeline
+      menu-run
+      ;;
+    13)
+      _nextsystemd_bg_stop
+      menu-run
+      ;;
+    14)
+      _nextsystemd_bg_log
       menu-run
       ;;
     *)
