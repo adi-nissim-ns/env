@@ -5,6 +5,120 @@ _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 _HISTORY_MAX=10
 _HISTORY_NEXTSYSTEMD="${_ENV_PROJECT_DIR}/.history_nextsystemd"
 _HISTORY_NEXTLOADER="${_ENV_PROJECT_DIR}/.history_nextloader"
+_NEXTSYSTEMD_PID_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.pid"
+_NEXTSYSTEMD_LOG_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.log"
+
+function _nextsystemd_bg_is_running {
+    [[ ! -f "$_NEXTSYSTEMD_PID_FILE" ]] && return 1
+    local pid
+    pid=$(cat "$_NEXTSYSTEMD_PID_FILE" 2>/dev/null)
+    [[ -z "$pid" ]] && return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+function _nextsystemd_bg_stop {
+    if _nextsystemd_bg_is_running; then
+        local pid
+        pid=$(cat "$_NEXTSYSTEMD_PID_FILE")
+        echo_running "Stopping background nextsystemd (PID: $pid)..."
+        kill "$pid" 2>/dev/null
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            echo_warning "Process still alive, sending SIGKILL..."
+            kill -9 "$pid" 2>/dev/null
+        fi
+        rm -f "$_NEXTSYSTEMD_PID_FILE"
+        echo_success "Stopped"
+    else
+        echo_info "No background nextsystemd is running"
+        rm -f "$_NEXTSYSTEMD_PID_FILE"
+    fi
+}
+
+function _nextsystemd_bg_start {
+    local cfg_file="$1"
+
+    if _nextsystemd_bg_is_running; then
+        local pid
+        pid=$(cat "$_NEXTSYSTEMD_PID_FILE")
+        echo_warning "Background nextsystemd already running (PID: $pid). Killing it..."
+        _nextsystemd_bg_stop
+    fi
+
+    local existing_pids
+    existing_pids=$(pgrep -x nextsystemd 2>/dev/null)
+    if [[ -n "$existing_pids" ]]; then
+        echo_warning "Existing nextsystemd process(es) found (not started by this menu):"
+        ps -p $existing_pids -o pid,user,cmd 2>/dev/null
+        read -p "Kill them and start fresh? (y/n): " kill_choice
+        case "$kill_choice" in
+            y|Y )
+                for p in $existing_pids; do kill "$p" 2>/dev/null; done
+                sleep 2
+                existing_pids=$(pgrep -x nextsystemd 2>/dev/null)
+                if [[ -n "$existing_pids" ]]; then
+                    for p in $existing_pids; do kill -9 "$p" 2>/dev/null; done
+                    sleep 1
+                fi
+                ;;
+            * )
+                echo_error "Aborted; existing nextsystemd would block startup."
+                return 1
+                ;;
+        esac
+    fi
+
+    : > "$_NEXTSYSTEMD_LOG_FILE"
+    if [[ -n "$cfg_file" ]]; then
+        echo_running "Starting nextsystemd --cfg-file $cfg_file in background..."
+        nextsystemd --cfg-file "$cfg_file" > "$_NEXTSYSTEMD_LOG_FILE" 2>&1 &
+    else
+        echo_running "Starting nextsystemd (default cfg) in background..."
+        nextsystemd > "$_NEXTSYSTEMD_LOG_FILE" 2>&1 &
+    fi
+    local pid=$!
+    echo "$pid" > "$_NEXTSYSTEMD_PID_FILE"
+    sleep 2
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo_error "nextsystemd failed to start. Log ($_NEXTSYSTEMD_LOG_FILE):"
+        echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+        cat "$_NEXTSYSTEMD_LOG_FILE"
+        echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+        rm -f "$_NEXTSYSTEMD_PID_FILE"
+        return 1
+    fi
+    echo_success "nextsystemd started (PID: $pid)"
+    echo_info "  log: $_NEXTSYSTEMD_LOG_FILE"
+}
+
+function _nextsystemd_bg_log {
+    if [[ ! -f "$_NEXTSYSTEMD_LOG_FILE" ]]; then
+        echo_warning "No nextsystemd log found at $_NEXTSYSTEMD_LOG_FILE"
+        return 1
+    fi
+    echo -e "${CYAN}── nextsystemd log ($_NEXTSYSTEMD_LOG_FILE) ────────────────────${NC}"
+    cat "$_NEXTSYSTEMD_LOG_FILE"
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
+}
+
+function _nextsystemd_print_profiler_link {
+    if [[ ! -f "$_NEXTSYSTEMD_LOG_FILE" ]]; then
+        echo_warning "No nextsystemd log found"
+        return 1
+    fi
+    local link
+    link=$(grep -oE 'http://[^[:space:]]+/nextprofiler[^[:space:]]*' "$_NEXTSYSTEMD_LOG_FILE" 2>/dev/null | head -1)
+    if [[ -z "$link" ]]; then
+        echo_warning "Profiler link not yet available in $_NEXTSYSTEMD_LOG_FILE"
+        return 1
+    fi
+    echo ""
+    echo -e "${bldcyn}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${bldcyn}║                       PROFILER LINK                          ║${NC}"
+    echo -e "${bldcyn}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "  ${bldgrn}🔗  $link${NC}"
+    echo ""
+}
 
 function _history_add {
     local file="$1"
@@ -270,6 +384,10 @@ function run_nextloader {
         echo ""
     fi
 
+    if [[ -n "$_NEXTLOADER_POST_OPT_HOOK" ]]; then
+        $_NEXTLOADER_POST_OPT_HOOK
+    fi
+
     echo -e "${bldcyn}┌─────────────────────────────────────────┐${NC}"
     echo -e "${bldcyn}│         RUNNING ON THE DEVICE           │${NC}"
     echo -e "${bldcyn}└─────────────────────────────────────────┘${NC}"
@@ -314,6 +432,10 @@ function menu-run() {
   echo ""
   echo "10. nextloader: run nextloader command (CPU → wait for optimization → Device)"
   echo "11. nextcli:    clear optimization state for current application"
+  echo ""
+  echo "12. pipeline:   bg nextsystemd + nextloader + profiler link (uses --cfg-file from history entry)"
+  echo "13. pipeline:   stop background nextsystemd"
+  echo "14. pipeline:   show background nextsystemd log"
   echo ""
   echo "================================================"
   
@@ -390,6 +512,56 @@ function menu-run() {
       ;;
     11)
       run_command nextcli application clear
+      menu-run
+      ;;
+    12)
+      local nl_dir="" nl_cmd=""
+      if _history_menu "$_HISTORY_NEXTLOADER" "nextloader commands"; then
+          if [[ "$_history_selection" == *$'\t'* ]]; then
+              nl_dir="${_history_selection%%$'\t'*}"
+              nl_cmd="${_history_selection#*$'\t'}"
+          else
+              nl_cmd="$_history_selection"
+          fi
+      else
+          echo_info "Enter the full nextloader command:"
+          read -r nl_cmd
+      fi
+
+      local p12_cfg=""
+      local p12_args=($nl_cmd)
+      for ((i=0; i<${#p12_args[@]}; i++)); do
+          if [[ "${p12_args[$i]}" == "--cfg-file" ]]; then
+              p12_cfg="${p12_args[$i+1]}"
+              break
+          fi
+      done
+
+      if [[ -z "$p12_cfg" ]]; then
+          echo_info "No --cfg-file in command; nextsystemd will use the default cfg."
+      fi
+
+      local _saved_pwd="$PWD"
+      if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
+          echo_info "Switching to: $nl_dir"
+          cd "$nl_dir"
+      fi
+
+      if _nextsystemd_bg_start "$p12_cfg"; then
+          _NEXTLOADER_POST_OPT_HOOK="_nextsystemd_print_profiler_link"
+          run_nextloader $nl_cmd
+          unset _NEXTLOADER_POST_OPT_HOOK
+      fi
+
+      cd "$_saved_pwd"
+      menu-run
+      ;;
+    13)
+      _nextsystemd_bg_stop
+      menu-run
+      ;;
+    14)
+      _nextsystemd_bg_log
       menu-run
       ;;
     *)
