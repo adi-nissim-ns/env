@@ -86,35 +86,53 @@ function webserver_cleanup {
 }
 
 function run_nextsystemd {
-  # ask the user if they want to continue with default cfg file
+  local cfg_file=""
+  local cfg_options=""
+  local cfg_dir=""
+  local _saved_pwd="$PWD"
+
   read -p "Do you want to continue with the default cfg file? (y/n): " choice
   case "$choice" in
       n|N )
           if _history_menu "$_HISTORY_NEXTSYSTEMD" "cfg files"; then
-              cfg_file="$_history_selection"
+              if [[ "$_history_selection" == *$'\t'* ]]; then
+                  cfg_dir="${_history_selection%%$'\t'*}"
+                  cfg_file="${_history_selection#*$'\t'}"
+              else
+                  cfg_file="$_history_selection"
+              fi
           else
               echo_info "Please enter the path to the cfg file: "
               read cfg_file
           fi
+
+          if [[ -n "$cfg_dir" && -d "$cfg_dir" ]]; then
+              echo_info "Switching to: $cfg_dir"
+              cd "$cfg_dir"
+          fi
+
           if [ ! -f "$cfg_file" ]; then
-              echo_error "File not found!"
+              echo_error "File not found: $cfg_file"
+              cd "$_saved_pwd"
               return 1
           fi
-          _history_add "$_HISTORY_NEXTSYSTEMD" "$cfg_file"
+          _history_add "$_HISTORY_NEXTSYSTEMD" "$(pwd)"$'\t'"$cfg_file"
           cfg_options="--cfg-file $cfg_file"
           ;;
-      * ) 
+      * )
           echo "Continuing with default cfg file..."
           cfg_options=""
           ;;
 
-  esac   
+  esac
 
   #echo_running $NEXT_HOME/bin/nextdaemon $cfg_options
   #$NEXT_HOME/bin/nextdaemon $cfg_options
   echo_running nextsystemd $cfg_options
   nextsystemd $cfg_options
-  if [ $? -ne 0 ]; then
+  local rc=$?
+  cd "$_saved_pwd"
+  if [ $rc -ne 0 ]; then
       echo_error "${@}"
       
       # ask the user if they want to continue without a device 
