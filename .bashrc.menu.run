@@ -2,6 +2,60 @@
 
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
+_HISTORY_MAX=10
+_HISTORY_NEXTSYSTEMD="${_ENV_PROJECT_DIR}/.history_nextsystemd"
+_HISTORY_NEXTLOADER="${_ENV_PROJECT_DIR}/.history_nextloader"
+
+function _history_add {
+    local file="$1"
+    local entry="$2"
+    local tmp
+    tmp=$(mktemp)
+    echo "$entry" > "$tmp"
+    if [[ -f "$file" ]]; then
+        grep -Fxv "$entry" "$file" | head -n $((_HISTORY_MAX - 1)) >> "$tmp"
+    fi
+    mv "$tmp" "$file"
+}
+
+_history_selection=""
+
+function _history_menu {
+    local file="$1"
+    local title="$2"
+    _history_selection=""
+
+    if [[ ! -f "$file" ]] || [[ ! -s "$file" ]]; then
+        return 1
+    fi
+
+    echo ""
+    echo_info "Recent $title:"
+    local i=1
+    local entries=()
+    while IFS= read -r line; do
+        echo -e "  ${CYAN}$i.${NC} $line"
+        entries+=("$line")
+        ((i++))
+    done < "$file"
+    echo -e "  ${YELLOW}0.${NC} Enter manually"
+    echo ""
+
+    read -p "Select from history (0 to enter manually): " choice
+
+    if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
+        return 1
+    fi
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#entries[@]} ]]; then
+        _history_selection="${entries[$((choice-1))]}"
+        return 0
+    fi
+
+    echo_error "Invalid selection"
+    return 1
+}
+
 function webserver_cleanup {
   echo_error " TODO: add this" 
 }
@@ -10,16 +64,19 @@ function run_nextsystemd {
   # ask the user if they want to continue with default cfg file
   read -p "Do you want to continue with the default cfg file? (y/n): " choice
   case "$choice" in
-      n|N ) 
-          # get from user a cfg file   
-          echo_info "Please enter the path to the cfg file: "
-          read cfg_file
-          if [ ! -f $cfg_file ]; then
-              echo_error "File not found!" 
-              return 1
+      n|N )
+          if _history_menu "$_HISTORY_NEXTSYSTEMD" "cfg files"; then
+              cfg_file="$_history_selection"
           else
-              cfg_options="--cfg-file $cfg_file"           
-          fi          
+              echo_info "Please enter the path to the cfg file: "
+              read cfg_file
+          fi
+          if [ ! -f "$cfg_file" ]; then
+              echo_error "File not found!"
+              return 1
+          fi
+          _history_add "$_HISTORY_NEXTSYSTEMD" "$cfg_file"
+          cfg_options="--cfg-file $cfg_file"
           ;;
       * ) 
           echo "Continuing with default cfg file..."
@@ -83,6 +140,8 @@ function run_nextloader {
         echo_error "Command must start with 'nextloader'. Got: '${YELLOW}$first_word${NC}'"
         return 1
     fi
+
+    _history_add "$_HISTORY_NEXTLOADER" "$cmd"
 
     local cfg_file=""
     local args=($cmd)
@@ -259,8 +318,12 @@ function menu-run() {
       menu-run
       ;;
     10)
-      echo_info "Enter the full nextloader command:"
-      read -r nl_cmd
+      if _history_menu "$_HISTORY_NEXTLOADER" "nextloader commands"; then
+          nl_cmd="$_history_selection"
+      else
+          echo_info "Enter the full nextloader command:"
+          read -r nl_cmd
+      fi
       run_nextloader $nl_cmd
       menu-run
       ;;
