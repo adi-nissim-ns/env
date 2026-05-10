@@ -151,11 +151,15 @@ cleanup() {
 function run_nextloader {
     local cmd="$*"
 
-    local first_word
-    first_word=$(echo "$cmd" | awk '{print $1}')
+    local words=($cmd)
+    local idx=0
+    while [[ $idx -lt ${#words[@]} && "${words[$idx]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
+        ((idx++))
+    done
+    local first_word="${words[$idx]:-}"
 
     if [[ "$first_word" != "nextloader" ]]; then
-        echo_error "Command must start with 'nextloader'. Got: '${YELLOW}$first_word${NC}'"
+        echo_error "Command must start with 'nextloader' (env var prefixes like FOO=bar are allowed). Got: '${YELLOW}$first_word${NC}'"
         return 1
     fi
 
