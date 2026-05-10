@@ -29,31 +29,49 @@ function _history_menu {
         return 1
     fi
 
-    echo ""
-    echo_info "Recent $title:"
-    local i=1
-    local entries=()
-    while IFS= read -r line; do
-        echo -e "  ${CYAN}$i.${NC} $line"
-        entries+=("$line")
-        ((i++))
-    done < "$file"
-    echo -e "  ${YELLOW}0.${NC} Enter manually"
-    echo ""
+    while true; do
+        echo ""
+        echo_info "Recent $title:"
+        local i=1
+        local entries=()
+        while IFS= read -r line; do
+            echo -e "  ${CYAN}$i.${NC} $line"
+            entries+=("$line")
+            ((i++))
+        done < "$file"
+        echo -e "  ${YELLOW}0.${NC} Enter manually"
+        echo -e "  ${RED}d<num>.${NC} Delete history entry (e.g. d1)"
+        echo ""
 
-    read -p "Select from history (0 to enter manually): " choice
+        read -p "Selection: " choice
 
-    if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
-        return 1
-    fi
+        if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
+            return 1
+        fi
 
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#entries[@]} ]]; then
-        _history_selection="${entries[$((choice-1))]}"
-        return 0
-    fi
+        if [[ "$choice" =~ ^d([0-9]+)$ ]]; then
+            local del_idx="${BASH_REMATCH[1]}"
+            if [[ "$del_idx" -ge 1 && "$del_idx" -le ${#entries[@]} ]]; then
+                local to_del="${entries[$((del_idx-1))]}"
+                local tmp
+                tmp=$(mktemp)
+                grep -Fxv "$to_del" "$file" > "$tmp"
+                mv "$tmp" "$file"
+                echo_success "Removed: $to_del"
+                [[ ! -s "$file" ]] && return 1
+                continue
+            fi
+            echo_error "Invalid delete index"
+            continue
+        fi
 
-    echo_error "Invalid selection"
-    return 1
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#entries[@]} ]]; then
+            _history_selection="${entries[$((choice-1))]}"
+            return 0
+        fi
+
+        echo_error "Invalid selection"
+    done
 }
 
 function webserver_cleanup {
