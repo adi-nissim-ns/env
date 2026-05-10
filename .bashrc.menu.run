@@ -412,6 +412,48 @@ function run_nextloader {
     return $device_exit_code
 }
 
+function run_pipeline {
+    local nl_dir="" nl_cmd=""
+    if _history_menu "$_HISTORY_NEXTLOADER" "nextloader commands"; then
+        if [[ "$_history_selection" == *$'\t'* ]]; then
+            nl_dir="${_history_selection%%$'\t'*}"
+            nl_cmd="${_history_selection#*$'\t'}"
+        else
+            nl_cmd="$_history_selection"
+        fi
+    else
+        echo_info "Enter the full nextloader command:"
+        read -r nl_cmd
+    fi
+
+    local p12_cfg=""
+    local p12_args=($nl_cmd)
+    for ((i=0; i<${#p12_args[@]}; i++)); do
+        if [[ "${p12_args[$i]}" == "--cfg-file" ]]; then
+            p12_cfg="${p12_args[$i+1]}"
+            break
+        fi
+    done
+
+    if [[ -z "$p12_cfg" ]]; then
+        echo_info "No --cfg-file in command; nextsystemd will use the default cfg."
+    fi
+
+    local _saved_pwd="$PWD"
+    if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
+        echo_info "Switching to: $nl_dir"
+        cd "$nl_dir"
+    fi
+
+    if _nextsystemd_bg_start "$p12_cfg"; then
+        _NEXTLOADER_POST_OPT_HOOK="_nextsystemd_print_profiler_link"
+        run_nextloader $nl_cmd
+        unset _NEXTLOADER_POST_OPT_HOOK
+    fi
+
+    cd "$_saved_pwd"
+}
+
 function menu-run() {
   echo ""
   echo "====================menu-run===================="
@@ -515,45 +557,7 @@ function menu-run() {
       menu-run
       ;;
     12)
-      local nl_dir="" nl_cmd=""
-      if _history_menu "$_HISTORY_NEXTLOADER" "nextloader commands"; then
-          if [[ "$_history_selection" == *$'\t'* ]]; then
-              nl_dir="${_history_selection%%$'\t'*}"
-              nl_cmd="${_history_selection#*$'\t'}"
-          else
-              nl_cmd="$_history_selection"
-          fi
-      else
-          echo_info "Enter the full nextloader command:"
-          read -r nl_cmd
-      fi
-
-      local p12_cfg=""
-      local p12_args=($nl_cmd)
-      for ((i=0; i<${#p12_args[@]}; i++)); do
-          if [[ "${p12_args[$i]}" == "--cfg-file" ]]; then
-              p12_cfg="${p12_args[$i+1]}"
-              break
-          fi
-      done
-
-      if [[ -z "$p12_cfg" ]]; then
-          echo_info "No --cfg-file in command; nextsystemd will use the default cfg."
-      fi
-
-      local _saved_pwd="$PWD"
-      if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
-          echo_info "Switching to: $nl_dir"
-          cd "$nl_dir"
-      fi
-
-      if _nextsystemd_bg_start "$p12_cfg"; then
-          _NEXTLOADER_POST_OPT_HOOK="_nextsystemd_print_profiler_link"
-          run_nextloader $nl_cmd
-          unset _NEXTLOADER_POST_OPT_HOOK
-      fi
-
-      cd "$_saved_pwd"
+      run_pipeline
       menu-run
       ;;
     13)
