@@ -2,7 +2,7 @@
 
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
-_HISTORY_MAX=10
+_HISTORY_MAX=100
 _HISTORY_NEXTSYSTEMD="${_ENV_PROJECT_DIR}/.history_nextsystemd"
 _HISTORY_NEXTLOADER="${_ENV_PROJECT_DIR}/.history_nextloader"
 _NEXTSYSTEMD_PID_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.pid"
@@ -127,7 +127,12 @@ function _history_add {
     tmp=$(mktemp)
     echo "$entry" > "$tmp"
     if [[ -f "$file" ]]; then
-        grep -Fxv "$entry" "$file" | head -n $((_HISTORY_MAX - 1)) >> "$tmp"
+        # Dedup key is the full line (cwd<TAB>cmd). `grep -Fxv` drops any
+        # existing line equal to the new entry; `awk '!seen[$0]++'` then
+        # collapses any pre-existing duplicates while preserving order.
+        grep -Fxv "$entry" "$file" \
+            | awk '!seen[$0]++' \
+            | head -n $((_HISTORY_MAX - 1)) >> "$tmp"
     fi
     mv "$tmp" "$file"
 }
