@@ -14,6 +14,7 @@ function menu() {
   echo "6. Known aliases"
   echo "7. Known parameters"
   echo "8. Activate Python virtual environment"
+  echo "9. enter menu-claude"
   echo "=====================menu===================="
   
   read -p "Select an option: " option
@@ -68,6 +69,9 @@ function menu() {
       ;;
     8)
       activate_python_env
+      ;;
+    9)
+      menu-claude
       ;;
     *)
       echo "Invalid option. Please try again."

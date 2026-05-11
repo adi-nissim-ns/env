@@ -65,6 +65,7 @@ run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.main
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.run
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.env
 run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.kokkos
+run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.claude
 
 #------------------------------------------------------------------
 # Create directories if they don't exist

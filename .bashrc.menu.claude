@@ -1,0 +1,200 @@
+#!/bin/bash
+
+_ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+
+# ------------------------------------------------------------------
+# Help users who are new to the Claude Code CLI — install it, install
+# the env-aware skills, start a session, activate connectors, view docs.
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Launch `claude` inside a persistent tmux session so it survives SSH
+# drops. If already inside tmux we just run claude directly to avoid
+# nesting. Set _CLAUDE_NO_TMUX=1 to bypass and run bare.
+#
+# Note on mosh: mosh handles the *connection* to this machine; once
+# you're here, tmux is what keeps long-running sessions alive across
+# disconnects. A mosh client into a tmux'd claude session is the
+# combination that survives flaky networks.
+# ------------------------------------------------------------------
+function _claude_run() {
+  local -a args=("$@")
+  local session_name="claude-$(basename "$PWD")"
+
+  if [ "${_CLAUDE_NO_TMUX:-0}" = "1" ] || [ -n "${TMUX:-}" ]; then
+    if [ -n "${TMUX:-}" ]; then
+      echo_info "Already inside tmux — running claude directly."
+    fi
+    claude "${args[@]}"
+    return $?
+  fi
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo_warning "tmux not installed — running claude directly (no session persistence)."
+    echo_info    "Install tmux to keep claude alive across SSH drops."
+    claude "${args[@]}"
+    return $?
+  fi
+
+  echo_info    "Wrapping claude in tmux session: ${MAGENTA}${session_name}${NC}"
+  echo_info    "Detach with: Ctrl-b then d   Re-attach with: ta ${session_name}"
+  echo ""
+  # `new-session -A` attaches if the session exists, otherwise creates
+  # it and runs the command. If it already exists, claude is already
+  # running inside it (any new args are ignored, which is what we want
+  # — pick a different cwd if you need a distinct session).
+  tmux new-session -A -s "$session_name" "claude $(printf '%q ' "${args[@]}")"
+}
+
+function _claude_show_skills() {
+  local skill_dir="${HOME}/.claude/skills"
+  if [ ! -d "$skill_dir" ]; then
+    echo_warning "No skill directory at $skill_dir."
+    echo_info    "Run option 3 of menu-claude to install env-aware skills."
+    return 1
+  fi
+  echo_info "Skills in $skill_dir:"
+  local found=0
+  for s in "$skill_dir"/*/SKILL.md; do
+    [ -e "$s" ] || continue
+    found=1
+    local name desc
+    name=$(basename "$(dirname "$s")")
+    desc=$(grep -m1 '^description:' "$s" 2>/dev/null | sed 's/^description: *//')
+    echo "  - $name : $desc"
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "  (no skills installed yet)"
+  fi
+}
+
+function _claude_show_docs_links() {
+  echo ""
+  echo_info "Claude Code documentation:"
+  echo "    Overview:    https://docs.claude.com/en/docs/claude-code/overview"
+  echo "    Quickstart:  https://docs.claude.com/en/docs/claude-code/quickstart"
+  echo "    Slash cmds:  https://docs.claude.com/en/docs/claude-code/slash-commands"
+  echo "    Skills:      https://docs.claude.com/en/docs/claude-code/skills"
+  echo "    MCP:         https://docs.claude.com/en/docs/claude-code/mcp"
+  echo "    Connectors:  https://docs.claude.com/en/docs/claude-code/connectors"
+  echo ""
+  echo_info "In this repo:"
+  echo "    ${_ENV_PROJECT_DIR}/claude/USAGE.md"
+  echo "    ${_ENV_PROJECT_DIR}/claude/connections/README.md"
+  echo "    ${_ENV_PROJECT_DIR}/claude/skills/README.md"
+}
+
+function menu-claude() {
+  echo ""
+  echo "====================menu-claude===================="
+  echo "0.  Exit"
+  echo "1.  Main menu"
+  echo ""
+  echo "  --- Install / setup ---"
+  echo "2.  Install Claude CLI         (~/env/claude-install.sh)"
+  echo "3.  Install env-aware skills   (~/env/claude/skills/install-skills.sh)"
+  echo "4.  Verify install             (claude --version + path)"
+  echo ""
+  echo "  --- Run (wrapped in tmux: claude-$(basename "$PWD")) ---"
+  echo "5.  Start claude in current directory ($(pwd))"
+  echo "6.  Start claude --resume      (last session)"
+  echo "7.  Show installed skills"
+  echo ""
+  echo "  --- Connections (MCP) ---"
+  echo "8.  Activate connectors        (opens browser, then mcp list)"
+  echo "9.  List configured MCP servers (claude mcp list)"
+  echo "10. Show connection setup guide"
+  echo ""
+  echo "  --- Docs ---"
+  echo "11. Show USAGE.md"
+  echo "12. Show docs links"
+  echo "====================menu-claude===================="
+
+  read -p "Select an option: " option
+  case $option in
+    0)
+      echo "Exiting..."
+      return 0
+      ;;
+    1)
+      menu
+      ;;
+    2)
+      run_command ${_ENV_PROJECT_DIR}/claude-install.sh
+      menu-claude
+      ;;
+    3)
+      run_command ${_ENV_PROJECT_DIR}/claude/skills/install-skills.sh
+      menu-claude
+      ;;
+    4)
+      if command -v claude >/dev/null 2>&1; then
+        echo_info "claude found at: $(command -v claude)"
+        run_command claude --version
+      else
+        echo_error "claude not on PATH. Run option 2 first."
+      fi
+      menu-claude
+      ;;
+    5)
+      if command -v claude >/dev/null 2>&1; then
+        echo_running "claude (in $(pwd))"
+        _claude_run
+      else
+        echo_error "claude not on PATH. Run option 2 first."
+      fi
+      menu-claude
+      ;;
+    6)
+      if command -v claude >/dev/null 2>&1; then
+        echo_running "claude --resume"
+        _claude_run --resume
+      else
+        echo_error "claude not on PATH. Run option 2 first."
+      fi
+      menu-claude
+      ;;
+    7)
+      _claude_show_skills
+      menu-claude
+      ;;
+    8)
+      run_command ${_ENV_PROJECT_DIR}/claude/connect.sh
+      menu-claude
+      ;;
+    9)
+      if command -v claude >/dev/null 2>&1; then
+        run_command claude mcp list
+      else
+        echo_error "claude not on PATH. Run option 2 first."
+      fi
+      menu-claude
+      ;;
+    10)
+      if [ -f "${_ENV_PROJECT_DIR}/claude/connections/README.md" ]; then
+        cat "${_ENV_PROJECT_DIR}/claude/connections/README.md"
+      else
+        echo_error "Guide not found at ${_ENV_PROJECT_DIR}/claude/connections/README.md"
+      fi
+      menu-claude
+      ;;
+    11)
+      if [ -f "${_ENV_PROJECT_DIR}/claude/USAGE.md" ]; then
+        cat "${_ENV_PROJECT_DIR}/claude/USAGE.md"
+      else
+        echo_error "USAGE.md not found at ${_ENV_PROJECT_DIR}/claude/USAGE.md"
+      fi
+      menu-claude
+      ;;
+    12)
+      _claude_show_docs_links
+      menu-claude
+      ;;
+    *)
+      echo "Invalid option. Please try again."
+      menu-claude
+      ;;
+  esac
+}
+
+echo_info "Loading menu-claude ..."
