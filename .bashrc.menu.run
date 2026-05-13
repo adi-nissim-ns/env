@@ -8,6 +8,87 @@ _HISTORY_NEXTLOADER="${_ENV_PROJECT_DIR}/.history_nextloader"
 _NEXTSYSTEMD_PID_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.pid"
 _NEXTSYSTEMD_LOG_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.log"
 
+# Normalize a single absolute path: replace longest-matching env-var prefix.
+# $1=path  $2=cwd (optional; if set and path is under cwd, produce ./ form instead)
+function _history_normalize_path {
+    local p="$1"
+    local cwd="${2:-}"
+    [[ -z "$p" ]] && echo "$p" && return
+
+    if [[ -n "$cwd" && "$p" == "${cwd}/"* ]]; then
+        echo "./${p#"${cwd}/"}"
+        return
+    fi
+
+    # Longest-match-first so NEXTUTILS (= SW_HOME/nextutils) wins over SW_HOME
+    local _sp="${SPACE_PATH%/}"  # trim trailing slash for pattern matching
+    if   [[ -n "${NEXTUTILS:-}" && "$p" == "${NEXTUTILS}/"* ]]; then echo "\$NEXTUTILS/${p#"${NEXTUTILS}/"}"; return; fi
+    if   [[ -n "${NEXTUTILS:-}" && "$p" == "${NEXTUTILS}"   ]]; then echo "\$NEXTUTILS";                      return; fi
+    if   [[ -n "${SW_HOME:-}"   && "$p" == "${SW_HOME}/"*   ]]; then echo "\$SW_HOME/${p#"${SW_HOME}/"}";     return; fi
+    if   [[ -n "${SW_HOME:-}"   && "$p" == "${SW_HOME}"     ]]; then echo "\$SW_HOME";                        return; fi
+    if   [[ -n "${NEXT_HOME:-}" && "$p" == "${NEXT_HOME}/"* ]]; then echo "\$NEXT_HOME/${p#"${NEXT_HOME}/"}"; return; fi
+    if   [[ -n "${NEXT_HOME:-}" && "$p" == "${NEXT_HOME}"   ]]; then echo "\$NEXT_HOME";                      return; fi
+    if   [[ -n "${_sp:-}"       && "$p" == "${_sp}/"*       ]]; then echo "\$SPACE_PATH${p#"${_sp}/"}";       return; fi
+    if   [[ -n "${_sp:-}"       && "$p" == "${_sp}"         ]]; then echo "\$SPACE_PATH";                     return; fi
+    echo "$p"
+}
+
+# Normalize a full history entry (cwd<TAB>cmd):
+#   - cwd  : env-var substitution only
+#   - cmd  : paths under cwd become ./ relative, then env-var substitution
+# Result is stored so dedup works on the canonical form.
+function _history_normalize_entry {
+    local entry="$1"
+    [[ "$entry" != *$'\t'* ]] && echo "$entry" && return
+
+    local cwd="${entry%%$'\t'*}"
+    local cmd="${entry#*$'\t'}"
+
+    local norm_cwd
+    norm_cwd=$(_history_normalize_path "$cwd")
+
+    # Escape BRE metacharacters in the cwd path for sed
+    local _esc_cwd
+    _esc_cwd=$(printf '%s' "$cwd" | sed 's/[]\.[*^$()+?{|]/\\&/g')
+
+    local norm_cmd="$cmd"
+    local _esc _sp="${SPACE_PATH%/}"
+
+    # 1. Paths under cwd → ./relative
+    [[ -n "$cwd" ]] && norm_cmd=$(printf '%s' "$norm_cmd" | sed "s|${_esc_cwd}/|./|g")
+
+    # 2. Env-var substitution: longest match first (NEXTUTILS before SW_HOME, etc.)
+    if [[ -n "${NEXTUTILS:-}" ]]; then
+        _esc=$(printf '%s' "$NEXTUTILS" | sed 's/[]\.[*^$()+?{|]/\\&/g')
+        norm_cmd=$(printf '%s' "$norm_cmd" | sed "s|${_esc}/|\$NEXTUTILS/|g; s|${_esc}|\$NEXTUTILS|g")
+    fi
+    if [[ -n "${SW_HOME:-}" ]]; then
+        _esc=$(printf '%s' "$SW_HOME" | sed 's/[]\.[*^$()+?{|]/\\&/g')
+        norm_cmd=$(printf '%s' "$norm_cmd" | sed "s|${_esc}/|\$SW_HOME/|g; s|${_esc}|\$SW_HOME|g")
+    fi
+    if [[ -n "${NEXT_HOME:-}" ]]; then
+        _esc=$(printf '%s' "$NEXT_HOME" | sed 's/[]\.[*^$()+?{|]/\\&/g')
+        norm_cmd=$(printf '%s' "$norm_cmd" | sed "s|${_esc}/|\$NEXT_HOME/|g; s|${_esc}|\$NEXT_HOME|g")
+    fi
+    if [[ -n "${_sp:-}" ]]; then
+        _esc=$(printf '%s' "$_sp" | sed 's/[]\.[*^$()+?{|]/\\&/g')
+        norm_cmd=$(printf '%s' "$norm_cmd" | sed "s|${_esc}/|\$SPACE_PATH|g; s|${_esc}|\$SPACE_PATH|g")
+    fi
+
+    echo "${norm_cwd}"$'\t'"${norm_cmd}"
+}
+
+# Expand env-var tokens in a stored path so it can be used as a real filesystem path.
+function _history_expand_path {
+    local p="$1"
+    local _sp="${SPACE_PATH%/}"
+    p="${p//\$NEXTUTILS/${NEXTUTILS:-}}"
+    p="${p//\$SW_HOME/${SW_HOME:-}}"
+    p="${p//\$NEXT_HOME/${NEXT_HOME:-}}"
+    p="${p//\$SPACE_PATH/${_sp}/}"
+    echo "$p"
+}
+
 function _nextsystemd_bg_is_running {
     [[ ! -f "$_NEXTSYSTEMD_PID_FILE" ]] && return 1
     local pid
@@ -123,14 +204,15 @@ function _nextsystemd_print_profiler_link {
 function _history_add {
     local file="$1"
     local entry="$2"
+    # Normalize before storing so dedup works on the canonical form and
+    # entries remain valid after env-var changes (e.g. space3 → space4).
+    local norm_entry
+    norm_entry=$(_history_normalize_entry "$entry")
     local tmp
     tmp=$(mktemp)
-    echo "$entry" > "$tmp"
+    echo "$norm_entry" > "$tmp"
     if [[ -f "$file" ]]; then
-        # Dedup key is the full line (cwd<TAB>cmd). `grep -Fxv` drops any
-        # existing line equal to the new entry; `awk '!seen[$0]++'` then
-        # collapses any pre-existing duplicates while preserving order.
-        grep -Fxv "$entry" "$file" \
+        grep -Fxv "$norm_entry" "$file" \
             | awk '!seen[$0]++' \
             | head -n $((_HISTORY_MAX - 1)) >> "$tmp"
     fi
@@ -225,16 +307,21 @@ function run_nextsystemd {
               read cfg_file
           fi
 
-          if [[ -n "$cfg_dir" && -d "$cfg_dir" ]]; then
-              echo_info "Switching to: $cfg_dir"
-              cd "$cfg_dir"
+          local _exp_cfg_dir
+          _exp_cfg_dir=$(_history_expand_path "$cfg_dir")
+          if [[ -n "$_exp_cfg_dir" && -d "$_exp_cfg_dir" ]]; then
+              echo_info "Switching to: $_exp_cfg_dir"
+              cd "$_exp_cfg_dir"
           fi
 
-          if [ ! -f "$cfg_file" ]; then
-              echo_error "File not found: $cfg_file"
+          local _exp_cfg_file
+          _exp_cfg_file=$(_history_expand_path "$cfg_file")
+          if [ ! -f "$_exp_cfg_file" ]; then
+              echo_error "File not found: $_exp_cfg_file"
               cd "$_saved_pwd"
               return 1
           fi
+          cfg_file="$_exp_cfg_file"
           _history_add "$_HISTORY_NEXTSYSTEMD" "$(pwd)"$'\t'"$cfg_file"
           cfg_options="--cfg-file $cfg_file"
           ;;
@@ -445,9 +532,11 @@ function run_pipeline {
     fi
 
     local _saved_pwd="$PWD"
-    if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
-        echo_info "Switching to: $nl_dir"
-        cd "$nl_dir"
+    local _exp_nl_dir
+    _exp_nl_dir=$(_history_expand_path "$nl_dir")
+    if [[ -n "$_exp_nl_dir" && -d "$_exp_nl_dir" ]]; then
+        echo_info "Switching to: $_exp_nl_dir"
+        cd "$_exp_nl_dir"
     fi
 
     if _nextsystemd_bg_start "$p12_cfg"; then
@@ -546,10 +635,12 @@ function menu-run() {
           echo_info "Enter the full nextloader command:"
           read -r nl_cmd
       fi
-      if [[ -n "$nl_dir" && -d "$nl_dir" ]]; then
+      local _exp_nl_dir
+      _exp_nl_dir=$(_history_expand_path "$nl_dir")
+      if [[ -n "$_exp_nl_dir" && -d "$_exp_nl_dir" ]]; then
           local _saved_pwd="$PWD"
-          echo_info "Switching to: $nl_dir"
-          cd "$nl_dir"
+          echo_info "Switching to: $_exp_nl_dir"
+          cd "$_exp_nl_dir"
           run_nextloader $nl_cmd
           cd "$_saved_pwd"
       else

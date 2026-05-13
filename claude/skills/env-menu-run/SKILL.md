@@ -16,7 +16,36 @@ Most complex submenu in the env. Key concepts before diving in.
 | `.nextsystemd.pid`            | PID of the background nextsystemd (used by pipeline option 12)          |
 | `.nextsystemd.log`            | Captured stdout/stderr of that background process                       |
 
-`_HISTORY_MAX = 10` — older entries fall off automatically.
+`_HISTORY_MAX = 100` — older entries fall off automatically.
+
+## Path normalization in history
+
+History entries are stored in **canonical form**: absolute paths are replaced
+with env-var tokens before writing. This means:
+
+- Changing from `space3` to `space4` (or any `SHARED_SPACE_NAME` change)
+  doesn't break saved commands — stored `$SW_HOME/...` paths expand at use
+  time via `_history_expand_path`.
+- Duplicate detection uses the normalized form, so the same command run from
+  the same dir can't accumulate duplicates even if the raw paths looked
+  different at capture time.
+
+**Substitution order** (longest prefix wins):
+
+| Env var        | Example stored form                   |
+|----------------|---------------------------------------|
+| `$NEXTUTILS`   | `$NEXTUTILS/foo`                      |
+| `$SW_HOME`     | `$SW_HOME/llama/next-dnn`             |
+| `$NEXT_HOME`   | `$NEXT_HOME/bin/nextloader`           |
+| `$SPACE_PATH`  | `$SPACE_PATH.conan2`                  |
+
+Paths **under the working directory** stored in a history entry are made
+relative (`./build/bin/next-dnn-cli`) rather than replaced by env vars.
+
+The three functions that implement this are all in `.bashrc.menu.run`:
+- `_history_normalize_path path [cwd]` — normalize a single path
+- `_history_normalize_entry "cwd<TAB>cmd"` — normalize a full entry
+- `_history_expand_path path` — reverse: expand tokens back to real paths
 
 ## Menu options
 
