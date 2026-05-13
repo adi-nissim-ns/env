@@ -47,6 +47,19 @@ The three functions that implement this are all in `.bashrc.menu.run`:
 - `_history_normalize_entry "cwd<TAB>cmd"` — normalize a full entry
 - `_history_expand_path path` — reverse: expand tokens back to real paths
 
+## Per-project history view
+
+`_history_menu` defaults to **project mode**: only entries whose stored cwd
+matches the current directory are shown. The cwd is not repeated in the
+list — you see just the commands, because you're already in the right place.
+
+Press **`a`** inside the menu to switch to **all-projects view**, which groups
+all entries by project directory. Press **`p`** to return to project mode.
+
+When an entry is selected in either mode, `_history_selection` still holds
+the full `cwd<TAB>cmd` string so callers can cd if needed (e.g. when
+launched from a different directory via `run_pipeline`).
+
 ## Menu options
 
 | #   | Action                                                                                   |
