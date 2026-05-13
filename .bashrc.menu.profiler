@@ -638,57 +638,90 @@ function profile_extra {
             done
             ;;
         runs)
-            # Cluster active HBM rows (idlePct < 50) into discrete "runs" using a
-            # time-gap threshold (default 1s — HBM sampling is sub-ms during
-            # active windows, so any gap > 1s is between separate device runs).
-            # Reports per-run stats (aggregated across all rows at each timestamp)
-            # and the idle gap between runs (host overhead).
+            # Cluster all HBM timestamps into discrete "runs" by time-gap.
+            # No idle% filter — detects runs at any BW level (incl. small shapes).
+            # Bursts < min_ticks are treated as between-run noise but still shown
+            # as sub-events inside the gap breakdown so you can see what fills it.
             local n=10
             local gap_thresh="1.0"
+            local min_ticks=3
             shift  # discard "runs"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --gap)        gap_thresh="$2"; shift 2 ;;
+                    --min-ticks)  min_ticks="$2"; shift 2 ;;
                     [0-9]*)       n="$1"; shift ;;
                     *) shift ;;
                 esac
             done
 
-            # Per-timestamp aggregate: BW summed across rows, idle averaged.
+            # ── Slot config header (mill placement — fixed for the session) ──────
+            local sqlite_db
+            sqlite_db=$(_profiler_sqlite_db 2>/dev/null || echo "")
+            if [[ -n "$sqlite_db" ]]; then
+                local mill_rows
+                mill_rows=$(_profiler_q_sqlite \
+                    "SELECT m.name, pmm.usedCbu, pmm.possibleDup, pmm.placedDup
+                     FROM ProjectionMillMetrics pmm
+                     JOIN Mills m ON pmm.funcIdx=m.functionIndex
+                                AND pmm.headBbgIdx=m.headBbgIndex
+                     WHERE m.name IS NOT NULL;")
+                if [[ -n "$mill_rows" ]]; then
+                    printf "  SLOT CONFIG (mill placement — same for every run in this session):\n"
+                    printf "  %-46s  %7s  %12s  %10s  %9s\n" \
+                        "mill" "CBU/dup" "possible_dup" "placed_dup" "total_CBU"
+                    printf "  %-46s  %7s  %12s  %10s  %9s\n" \
+                        "----------------------------------------------" "-------" "------------" "----------" "---------"
+                    echo "$mill_rows" | while IFS='|' read -r nm cbu pos pld; do
+                        [[ -z "$nm" ]] && continue
+                        printf "  %-46s  %7s  %12s  %10s  %9s\n" \
+                            "${nm:0:46}" "$cbu" "$pos" "$pld" "$((cbu * pld))"
+                    done
+                    printf "\n"
+                fi
+            fi
+
+            # ── Per-timestamp aggregate (no idle% filter) ─────────────────────
             local raw
-            raw=$(_profiler_q_influx 'SELECT time, SUM("rdBandwidth") AS bw, AVG("idlePct") AS idle, AVG("stallPct") AS stall, COUNT(*) AS rows FROM hbm WHERE "idlePct" < 50 GROUP BY time ORDER BY time ASC')
+            raw=$(_profiler_q_influx 'SELECT time, SUM("rdBandwidth") AS bw, AVG("idlePct") AS idle, AVG("stallPct") AS stall, COUNT(*) AS rows FROM hbm GROUP BY time ORDER BY time ASC')
             if [[ -z "$raw" ]]; then
-                printf "  (no active HBM samples in DB — run a device cycle first)\n"
+                printf "  (no HBM samples in DB — run a device cycle first)\n"
                 return 0
             fi
 
-            printf "  PER-RUN HBM ACTIVITY (last %s runs, gap > %ss = new run)\n" "$n" "$gap_thresh"
+            printf "  PER-RUN HBM ACTIVITY (last %s runs, gap > %ss = new run, min-ticks = %s)\n" \
+                "$n" "$gap_thresh" "$min_ticks"
             printf "  -----------------------------------------------------------------------\n"
-            printf "  A 'run' = a burst of active timestamps (HBM samples with idle%% < 50%%).\n"
-            printf "  Each row in the table aggregates one device kernel call.\n"
-            printf "  agg_BW = SUM of per-event read bandwidth across all rows at each\n"
-            printf "           timestamp, averaged over the burst (GB/s on the bus).\n"
+            printf "  type: COMP = peak_BW >= 0.5 GB/s (device kernel active)\n"
+            printf "        INIT = peak_BW  < 0.5 GB/s (loader/opt overhead, no compute)\n"
+            printf "  Runs ordered by start time — match to batch steps in sequence.\n"
             printf "\n"
 
-            echo "$raw" | gawk -v n="$n" -v gap_thresh="$gap_thresh" '
-                function to_epoch(rfc,   parts, base, frac, dt_parts, n_parts) {
-                    # rfc = "2026-05-13T09:18:32.509293427" or "...Z"
+            # Capture gawk output: table + __WIN__ metadata lines mixed in.
+            # __WIN__ lines carry epoch range + per-run HBM bucket counts for
+            # the bash post-processing below (cache queries). They are filtered
+            # before display via grep -v.
+            local gawk_out
+            gawk_out=$(echo "$raw" | gawk -v n="$n" -v gap_thresh="$gap_thresh" -v min_ticks="$min_ticks" '
+                function to_epoch(rfc,   parts, base, frac, n_parts) {
                     sub("T", " ", rfc); sub("Z$", "", rfc)
                     n_parts = split(rfc, parts, ".")
-                    # parts[1] = "2026-05-13 09:18:32"
-                    # convert "2026-05-13 09:18:32" → "2026 05 13 09 18 32"
                     s = parts[1]; gsub(/[-:]/, " ", s)
                     base = mktime(s)
                     frac = (n_parts >= 2) ? ("0." parts[2]) + 0 : 0
                     return base + frac
                 }
+                function fmt_gap(gs) {
+                    if (gs < 60)    return sprintf("%6.1fs", gs)
+                    else if (gs < 3600) return sprintf("%6.0fs  (%dm %02ds)", gs, int(gs/60), int(gs)%60)
+                    else            return sprintf("%6.0fs  (%dh %02dm)",     gs, int(gs/3600), int((gs%3600)/60))
+                }
                 {
-                    # parse jsonl
-                    match($0, /"time":"[^"]+"/);    tstr=substr($0, RSTART+8, RLENGTH-9)
-                    match($0, /"bw":[0-9.eE+-]+/);  bw  =substr($0, RSTART+5, RLENGTH-5)+0
-                    match($0, /"idle":[0-9.eE+-]+/);idl =substr($0, RSTART+7, RLENGTH-7)+0
-                    match($0, /"stall":[0-9.eE+-]+/);stl=substr($0, RSTART+8, RLENGTH-8)+0
-                    match($0, /"rows":[0-9]+/);     rws =substr($0, RSTART+7, RLENGTH-7)+0
+                    match($0, /"time":"[^"]+"/);     tstr=substr($0, RSTART+8, RLENGTH-9)
+                    match($0, /"bw":[0-9.eE+-]+/);   bw  =substr($0, RSTART+5, RLENGTH-5)+0
+                    match($0, /"idle":[0-9.eE+-]+/);  idl =substr($0, RSTART+7, RLENGTH-7)+0
+                    match($0, /"stall":[0-9.eE+-]+/); stl =substr($0, RSTART+8, RLENGTH-8)+0
+                    match($0, /"rows":[0-9]+/);       rws =substr($0, RSTART+7, RLENGTH-7)+0
 
                     e = to_epoch(tstr)
                     gap = e - prev_e
@@ -700,63 +733,208 @@ function profile_extra {
                         r_sum_bw[cid] = 0; r_peak_bw[cid] = bw
                         r_sum_id[cid] = 0; r_min_id[cid] = idl
                         r_sum_st[cid] = 0
+                        r_lt25[cid] = 0; r_v2550[cid] = 0
+                        r_v5075[cid] = 0; r_v75[cid] = 0
                     }
-                    r_n[cid]++
-                    r_rows[cid] += rws
-                    r_sum_bw[cid] += bw
-                    r_sum_id[cid] += idl
-                    r_sum_st[cid] += stl
+                    r_n[cid]++; r_rows[cid] += rws
+                    r_sum_bw[cid] += bw; r_sum_id[cid] += idl; r_sum_st[cid] += stl
                     if (bw  > r_peak_bw[cid]) r_peak_bw[cid] = bw
                     if (idl < r_min_id[cid])  r_min_id[cid]  = idl
+                    # per-run HBM idle% buckets
+                    if      (idl <  25) r_lt25[cid]++
+                    else if (idl <  50) r_v2550[cid]++
+                    else if (idl <  75) r_v5075[cid]++
+                    else                r_v75[cid]++
                     prev_e = e; prev_t = tstr
                 }
                 END {
                     if (cid == 0) { print "  (no clusters formed)"; exit }
                     r_end_e[cid] = prev_e; r_end_t[cid] = prev_t
-                    start = (cid > n) ? cid - n + 1 : 1
 
-                    printf "  %-4s  %-19s  %8s  %5s  %6s  %8s  %8s  %8s  %8s\n", \
-                           "run", "start (local time)", "dur_ms", "ticks", "events", "avg_BW", "peak_BW", "avg_idl%", "min_idl%"
-                    printf "  %-4s  %-19s  %8s  %5s  %6s  %8s  %8s  %8s  %8s\n", \
-                           "---", "-------------------", "--------", "-----", "------", "--------", "--------", "--------", "--------"
-                    for (i = start; i <= cid; i++) {
+                    k = 0
+                    for (i = 1; i <= cid; i++) {
+                        if (r_n[i] >= min_ticks+0) { k++; valid[k] = i }
+                    }
+                    if (k == 0) {
+                        printf "  (no clusters with >= %d ticks — try --min-ticks 1)\n", min_ticks+0
+                        exit
+                    }
+                    start = (k > n) ? k - n + 1 : 1
+
+                    # ── Main run table ────────────────────────────────────────
+                    printf "  %-4s  %-4s  %-19s  %8s  %5s  %6s  %8s  %8s  %8s  %8s\n", \
+                           "run", "type", "start (local time)", "dur_ms", "ticks", "events", \
+                           "avg_BW", "peak_BW", "avg_idl%", "min_idl%"
+                    printf "  %-4s  %-4s  %-19s  %8s  %5s  %6s  %8s  %8s  %8s  %8s\n", \
+                           "---", "----", "-------------------", "--------", "-----", "------", \
+                           "--------", "--------", "--------", "--------"
+                    for (j = start; j <= k; j++) {
+                        i = valid[j]
                         dur_ms = (r_end_e[i] - r_start_e[i]) * 1000
                         avg_bw = r_sum_bw[i] / r_n[i]
                         avg_id = r_sum_id[i] / r_n[i]
+                        rtype  = (r_peak_bw[i] >= 0.5) ? "COMP" : "INIT"
                         cmd = "date -d \"" r_start_t[i] "\" +\"%Y-%m-%d %H:%M:%S\""
                         cmd | getline tlocal; close(cmd)
-                        printf "  %-4d  %-19s  %8.1f  %5d  %6d  %8.1f  %8.1f  %8.1f  %8.1f\n", \
-                               i, tlocal, dur_ms, r_n[i], r_rows[i], avg_bw, r_peak_bw[i], avg_id, r_min_id[i]
+                        printf "  %-4d  %-4s  %-19s  %8.1f  %5d  %6d  %8.1f  %8.1f  %8.1f  %8.1f\n", \
+                               j, rtype, tlocal, dur_ms, r_n[i], r_rows[i], \
+                               avg_bw, r_peak_bw[i], avg_id, r_min_id[i]
                     }
+
                     printf "\n"
                     printf "  Legend:\n"
-                    printf "    dur_ms    wall-clock span of the active window (ms)\n"
-                    printf "    ticks     distinct HBM timestamps in the burst\n"
-                    printf "    events    individual HBM access events (one row each)\n"
-                    printf "    avg/peak_BW   aggregate read bandwidth across all banks (GB/s)\n"
-                    printf "    avg/min_idl%% bus idle %% per tick (lower = more loaded)\n"
+                    printf "    dur_ms       first HBM tick to last HBM tick within the burst\n"
+                    printf "    ticks        distinct HBM sample timestamps\n"
+                    printf "    events       HBM bank-access rows (32 banks typical per tick)\n"
+                    printf "    avg/peak_BW  aggregate read BW across all banks (GB/s)\n"
+                    printf "    avg/min_idl%% per-tick bus idle %% (COMP runs drive this below 50%%)\n"
 
-                    if (cid >= 2) {
+                    # ── Inter-run gaps ────────────────────────────────────────
+                    if (k >= 2) {
                         printf "\n"
-                        printf "  INTER-RUN GAPS (idle time between runs — host overhead):\n"
-                        printf "  Includes: command exit, edit/build/load, next-loader startup,\n"
-                        printf "            opt-pass re-run, slot reassignment, page-cache warm-up.\n"
+                        printf "  INTER-RUN GAPS (end of run N to start of run N+1):\n"
+                        printf "  -----------------------------------------------------------------------\n"
+                        printf "  Typical breakdown of a ~10s between-step gap in a batch:\n"
+                        printf "    nextloader process start + arg parse      ~1-2s\n"
+                        printf "    nextsystemd socket connect                  ~1s\n"
+                        printf "    IMPROVED state check  (nextcli)             ~1s\n"
+                        printf "    device dispatch + first-iteration setup    ~2-3s\n"
+                        printf "    HBM sampler lag before first recorded tick ~1-3s\n"
+                        printf "  Sub-events inside a gap = noise bursts below min-ticks threshold.\n"
                         printf "\n"
-                        printf "  %-18s  %10s\n", "between", "gap"
-                        printf "  %-18s  %10s\n", "------------------", "----------"
-                        for (i = start + 1; i <= cid; i++) {
-                            gs = r_start_e[i] - r_end_e[i-1]
-                            if      (gs < 60)   ghr = sprintf("%.1fs", gs)
-                            else if (gs < 3600) ghr = sprintf("%dm %ds", int(gs/60), int(gs)%60)
-                            else                ghr = sprintf("%dh %dm", int(gs/3600), int((gs%3600)/60))
-                            printf "  run %-3d → run %-3d  %10s\n", i-1, i, ghr
+                        printf "  %-22s  %24s\n", "between", "gap (total seconds)"
+                        printf "  %-22s  %24s\n", "----------------------", "------------------------"
+                        for (j = start + 1; j <= k; j++) {
+                            i_cur  = valid[j]; i_prev = valid[j-1]
+                            gs = r_start_e[i_cur] - r_end_e[i_prev]
+                            printf "  run %-4d -> run %-4d  %s\n", j-1, j, fmt_gap(gs)
+                            for (si = valid[j-1]+1; si < valid[j]; si++) {
+                                if (r_n[si] < min_ticks+0) {
+                                    sub_dur = (r_end_e[si] - r_start_e[si]) * 1000
+                                    sub_off = r_start_e[si] - r_end_e[valid[j-1]]
+                                    sub_typ = (r_peak_bw[si] >= 0.5) ? "COMP" : "INIT"
+                                    printf "    |-- [%s] +%.1fs in gap,  dur=%.0fms,  %d ticks,  peak_BW=%.1f\n", \
+                                        sub_typ, sub_off, sub_dur, r_n[si], r_peak_bw[si]
+                                }
+                            }
                         }
                     } else {
-                        printf "\n"
-                        printf "  (only 1 run in DB — re-run the kernel to see inter-run gaps)\n"
+                        printf "\n  (only 1 run in DB — re-run the kernel to see inter-run gaps)\n"
+                    }
+
+                    # ── __WIN__ metadata for bash telemetry queries (hidden from display) ──
+                    # Fields: run_num type start_ts(19chars) end_ts(19chars) lt25 v2550 v5075 v75 avg_idle avg_stall
+                    # Timestamps are raw InfluxDB strings (UTC, no Z suffix).
+                    # Bash adds +-1s buffer using local date (no -u/Z) so numeric values
+                    # match InfluxDB stored UTC strings despite the IDT shell timezone.
+                    for (j = start; j <= k; j++) {
+                        i = valid[j]
+                        rtype = (r_peak_bw[i] >= 0.5) ? "COMP" : "INIT"
+                        printf "__WIN__ %d %s %s %s %d %d %d %d %.2f %.4f\n", \
+                            j, rtype, substr(r_start_t[i],1,19), substr(r_end_t[i],1,19), \
+                            r_lt25[i]+0, r_v2550[i]+0, r_v5075[i]+0, r_v75[i]+0, \
+                            r_sum_id[i]/r_n[i], r_sum_st[i]/r_n[i]
                     }
                 }
-            '
+            ')
+
+            # Display table + gaps (strip __WIN__ lines)
+            echo "$gawk_out" | grep -v '^__WIN__'
+
+            # ── Per-run telemetry: two compact tables ────────────────────────
+            local win_lines
+            win_lines=$(echo "$gawk_out" | grep '^__WIN__')
+            if [[ -n "$win_lines" ]]; then
+                printf "\n"
+                printf "  PER-RUN TELEMETRY (COMP runs only):\n"
+
+                local -a t1_rows=()
+                local -a t2_rows=()
+                local anomaly_note=""
+
+                while IFS=' ' read -r _tag run_num rtype ts_raw te_raw lt25 v2550 v5075 v75 avg_idle avg_stall; do
+                    [[ "$rtype" == "INIT" ]] && continue
+
+                    # ±1s buffered timestamps for InfluxDB WHERE clause.
+                    # date -d (no -u, no Z): IDT shell; numeric value matches InfluxDB UTC.
+                    local ts_e te_e ts te tlocal
+                    ts_e=$(date -d "${ts_raw}" '+%s' 2>/dev/null || echo "0")
+                    te_e=$(date -d "${te_raw}" '+%s' 2>/dev/null || echo "0")
+                    ts=$(date -d "@$((ts_e - 1))" '+%Y-%m-%dT%H:%M:%S.000' 2>/dev/null || echo "${ts_raw}.000")
+                    te=$(date -d "@$((te_e + 1))" '+%Y-%m-%dT%H:%M:%S.000' 2>/dev/null || echo "${te_raw}.000")
+                    tlocal=$(date -d "${ts_raw}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "?")
+
+                    # HBM verdict (from gawk bucket counts — no extra query)
+                    local active=$((lt25 + v2550)) verdict
+                    if [[ "$lt25" -gt 0 ]]; then
+                        local sat_pct
+                        sat_pct=$(awk -v a="$lt25" -v t="$active" 'BEGIN{printf "%.0f", 100*a/t}')
+                        verdict="BUS(${sat_pct}%)"
+                    elif [[ "$active" -gt 0 ]]; then
+                        verdict="REQ-ISSUE"
+                    elif [[ "$v5075" -gt 0 ]]; then
+                        verdict="MODERATE"
+                    else
+                        verdict="LOW"
+                    fi
+
+                    t1_rows+=("$(printf "  %3d  %-19s  %7d  %8d  %8d  %9d  %9s  %10s  %s" \
+                        "$run_num" "$tlocal" "$lt25" "$v2550" "$v5075" "$v75" \
+                        "$(awk -v v="${avg_idle:-0}" 'BEGIN{printf "%.1f%%",v}')" \
+                        "$(awk -v v="${avg_stall:-0}" 'BEGIN{printf "%.4f%%",v}')" \
+                        "$verdict")")
+
+                    # Cache, MEP, MMU — time-range queries to InfluxDB
+                    local hp h m mep mmu_req
+                    hp=$(_profiler_scalar      "SELECT SUM(\"counter\") FROM \"cbuMemcipMcuHitFipAndPrefetchCounter\" WHERE time >= '$ts' AND time <= '$te'")
+                    h=$(_profiler_scalar       "SELECT SUM(\"counter\") FROM \"cbuMemcipMcuHitFipNoPrefetchCounter\" WHERE time >= '$ts' AND time <= '$te'")
+                    m=$(_profiler_scalar       "SELECT SUM(\"counter\") FROM \"cbuMemcipMcuMissCounter\" WHERE time >= '$ts' AND time <= '$te'")
+                    mep=$(_profiler_scalar     "SELECT SUM(\"counter\") FROM \"mepRequestsCounter\" WHERE time >= '$ts' AND time <= '$te'")
+                    mmu_req=$(_profiler_scalar "SELECT SUM(\"counter\") FROM \"mmuReqBpCounter\" WHERE time >= '$ts' AND time <= '$te'")
+                    hp=${hp:-0}; h=${h:-0}; m=${m:-0}; mep=${mep:-0}; mmu_req=${mmu_req:-0}
+
+                    local miss_pct miss_val
+                    miss_pct=$(awk -v hp="$hp" -v h="$h" -v m="$m" \
+                        'BEGIN{t=hp+h+m; if(t>0){printf "%.1f%%",100*m/t} else {printf "n/a"}}')
+                    miss_val=$(awk -v hp="$hp" -v h="$h" -v m="$m" \
+                        'BEGIN{t=hp+h+m; if(t>0){printf "%.1f",100*m/t} else {printf "-1"}}')
+                    if awk -v v="$miss_val" 'BEGIN{exit !(v >= 0 && v < 25)}'; then
+                        anomaly_note="${anomaly_note}  * run ${run_num}: miss%=${miss_pct} is low (typical ~50%) -- warm cache or short window.\n"
+                    fi
+
+                    t2_rows+=("$(printf "  %3d  %-19s  %11s  %9s  %5s  %9s  %10s" \
+                        "$run_num" "$tlocal" \
+                        "$(_profiler_human_num "$h")" \
+                        "$(_profiler_human_num "$m")" \
+                        "$miss_pct" \
+                        "$(_profiler_human_num "$mep")" \
+                        "$(_profiler_human_num "$mmu_req")")")
+                done <<< "$win_lines"
+
+                if [[ ${#t1_rows[@]} -eq 0 ]]; then
+                    printf "  (no COMP runs — only INIT runs in this window)\n"
+                else
+                    printf "\n  HBM DISTRIBUTION  (tick counts per idle%% bucket):\n"
+                    printf "  %3s  %-19s  %7s  %8s  %8s  %9s  %9s  %10s  %s\n" \
+                        "run" "start" "[0,25%)" "[25,50%)" "[50,75%)" "[75,100%]" \
+                        "avg_idle%" "avg_stall%" "verdict"
+                    printf "  %3s  %-19s  %7s  %8s  %8s  %9s  %9s  %10s  %s\n" \
+                        "---" "-------------------" "-------" "--------" "--------" \
+                        "---------" "---------" "----------" "-------"
+                    for row in "${t1_rows[@]}"; do printf "%s\n" "$row"; done
+
+                    printf "\n  RUNTIME TELEMETRY  (cache, MEP, MMU — per-run time window):\n"
+                    printf "  %3s  %-19s  %11s  %9s  %5s  %9s  %10s\n" \
+                        "run" "start" "hits(no-pf)" "misses" "miss%" "mep_reqs" "mmu_req_bp"
+                    printf "  %3s  %-19s  %11s  %9s  %5s  %9s  %10s\n" \
+                        "---" "-------------------" "-----------" "---------" "-----" \
+                        "---------" "----------"
+                    for row in "${t2_rows[@]}"; do printf "%s\n" "$row"; done
+
+                    [[ -n "$anomaly_note" ]] && printf "\n  NOTES:\n%b" "$anomaly_note"
+                fi
+                printf "\n"
+            fi
             ;;
         all)
             for s in hbm-dist runs hbm-ts cache-rates mill bbg; do
@@ -765,8 +943,9 @@ function profile_extra {
         *|-h|--help)
             cat <<EOF
 profile_extra hbm-dist                 # HBM idle% distribution buckets (all samples, aggregated)
-profile_extra runs [N] [--gap S]       # last N runs (clustered active windows) + inter-run gaps
-                                       #   --gap S: time gap (seconds) that separates runs (default 60)
+profile_extra runs [N] [--gap S] [--min-ticks T]   # last N runs (clustered by time-gap) + inter-run gaps
+                                       #   --gap S:       gap in seconds that separates runs (default 1)
+                                       #   --min-ticks T: min ticks to count as a real run (default 3)
 profile_extra hbm-ts [N]               # top N ACTIVE HBM samples (idle<50%, lowest-idle first) — default 40
 profile_extra hbm-ts --all [N]         # last N samples chronologically (mostly idle between calls)
 profile_extra cache-rates              # cache hit/miss with %
