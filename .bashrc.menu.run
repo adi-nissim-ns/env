@@ -949,7 +949,12 @@ function menu-run() {
       menu-run
       ;;
     13)
-      _nextsystemd_bg_stop
+      read -p "Are you sure you want to stop the background nextsystemd? (y/n): " _confirm
+      if [[ "$_confirm" == "y" || "$_confirm" == "Y" ]]; then
+        _nextsystemd_bg_stop
+      else
+        echo_info "Cancelled."
+      fi
       menu-run
       ;;
     14)
