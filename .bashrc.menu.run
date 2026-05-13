@@ -250,17 +250,24 @@ function _history_menu {
         local i=1
 
         if [[ "$show_all" -eq 0 ]]; then
-            echo_info "$title  ${MAGENTA}[$norm_pwd]${NC}"
+            # Collect project entries first; auto-switch to all-projects if none found.
+            local -a _proj_entries=()
             while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
-                local _hdir="${line%%$'\t'*}"
-                [[ "$_hdir" != "$norm_pwd" ]] && continue
+                [[ "${line%%$'\t'*}" == "$norm_pwd" ]] && _proj_entries+=("$line")
+            done < "$file"
+            if [[ ${#_proj_entries[@]} -eq 0 ]]; then
+                show_all=1
+                continue
+            fi
+
+            echo_info "$title  ${MAGENTA}[$norm_pwd]${NC}"
+            for line in "${_proj_entries[@]}"; do
                 local _hcmd="${line#*$'\t'}"
                 echo -e "  ${CYAN}$i.${NC} $_hcmd"
                 entries+=("$line")
                 ((i++))
-            done < "$file"
-            [[ ${#entries[@]} -eq 0 ]] && echo_warning "  (no history for this project yet)"
+            done
             echo -e "  ${YELLOW}0.${NC} Enter manually"
             echo -e "  ${RED}d<N>${NC} Delete entry (e.g. d1)   ${CYAN}a${NC} All projects"
         else
