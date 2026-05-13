@@ -1,0 +1,779 @@
+#!/bin/bash
+# .bashrc.menu.profiler — generic profile-data helpers for any nextloader run.
+#
+# All functions auto-detect the running nextsystemd's InfluxDB endpoint and
+# the collector's SQLite path by inspecting `ps` — no hardcoded project
+# paths. Output files default to the current working directory (overridable
+# via env vars).
+#
+# Provided functions (callable from any shell that has sourced env):
+#   profile_analyze [--label X] [--out-dir DIR]
+#   profile_compare <tsv1> <tsv2> [...]
+#   profile_extra <subcommand> [args...]
+#   profile_experiment <label> --warmup '<cmd>' --measure '<cmd>' [--out-dir DIR]
+#   menu-profiler        # interactive
+#
+# Pre-conditions: nextsystemd is running (start via menu-run), at least one
+# CPU-pass cycle has completed for the binary you want to inspect.
+
+_ENV_PROJECT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+
+_PROFILER_OUT_DIR_DEFAULT="${NEXT_PROFILER_OUT_DIR:-$PWD/profile_data}"
+
+#--------------------------------------------------------------------------
+# helpers — discover the running profiler endpoints (read-only)
+#--------------------------------------------------------------------------
+
+# Returns the InfluxDB HTTP URL (no trailing slash) or empty on failure.
+function _profiler_influx_url {
+    local bind
+    bind=$(ps -ef | grep -oP 'influxdb.*?--http-bind=\K[^ ]+' | head -1)
+    [[ -z "$bind" ]] && return 1
+    echo "http://$bind"
+}
+
+# Returns the SQLite collector.db path or empty on failure.
+function _profiler_sqlite_db {
+    local data_dir
+    data_dir=$(ps -ef | grep -oP 'collector .*?--database \K[^ ]+' | head -1)
+    [[ -z "$data_dir" ]] && return 1
+    echo "${data_dir}/collector.db"
+}
+
+# Returns the currently-loaded application binary path, or empty.
+function _profiler_app_binary {
+    nextcli --json application status 2>/dev/null | grep -oP '"application":\s*"\K[^"]+' | head -1
+}
+
+# Print an error if profiler is unreachable.
+function _profiler_require {
+    if ! _profiler_influx_url >/dev/null; then
+        echo_error "No running nextsystemd profiler found. Start it via menu-run." >&2
+        return 1
+    fi
+    if ! _profiler_sqlite_db >/dev/null; then
+        echo_warning "Collector SQLite path not detectable; projection metrics will be skipped." >&2
+    fi
+    return 0
+}
+
+# URL-encode a SQL query for InfluxDB.
+# Collapses tabs/newlines to spaces first so multi-line SQL strings work too.
+function _profiler_url_encode {
+    printf '%s' "$1" | tr '\t\n' '  ' | sed \
+        -e 's/ /%20/g' -e 's/"/%22/g' -e 's/\*/%2A/g' -e 's/,/%2C/g' \
+        -e 's/(/%28/g' -e 's/)/%29/g' -e "s/'/%27/g" \
+        -e 's/</%3C/g' -e 's/>/%3E/g'
+}
+
+function _profiler_q_influx {
+    local sql="$1"
+    local url
+    url=$(_profiler_influx_url) || return 1
+    local db="${NEXT_PROFILER_DB:-database}"
+    local encoded
+    encoded=$(_profiler_url_encode "$sql")
+    curl -s "${url}/api/v3/query_sql?db=${db}&q=${encoded}&format=jsonl" 2>/dev/null
+}
+
+function _profiler_q_sqlite {
+    local sql="$1"
+    local db
+    db=$(_profiler_sqlite_db) || return 1
+    sqlite3 "$db" "$sql" 2>/dev/null
+}
+
+# Extract a single scalar from the first jsonl row.
+function _profiler_scalar {
+    local sql="$1"
+    _profiler_q_influx "$sql" | head -1 | grep -oP ':[0-9.e+-]+' | head -1 | tr -d ':'
+}
+
+function _profiler_human_num {
+    awk -v n="$1" 'BEGIN {
+        if (n == "" || n == "0") { printf "%s", n; exit }
+        v = n+0
+        if (v >= 1e9) { printf "%.2fG", v/1e9 }
+        else if (v >= 1e6) { printf "%.2fM", v/1e6 }
+        else if (v >= 1e3) { printf "%.2fK", v/1e3 }
+        else { printf "%g", v }
+    }'
+}
+
+#--------------------------------------------------------------------------
+# profile_analyze — top-level metrics + automated bottleneck diagnosis
+#--------------------------------------------------------------------------
+function profile_analyze {
+    local label=""
+    local out_dir="$_PROFILER_OUT_DIR_DEFAULT"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --label)    label="$2"; shift 2 ;;
+            --out-dir)  out_dir="$2"; shift 2 ;;
+            -h|--help)
+                cat <<EOF
+profile_analyze [--label X] [--out-dir DIR]
+  Pull projection metrics + runtime telemetry from the running profiler.
+  Writes profile_<label>.tsv into <out-dir> (default: \$PWD/profile_data).
+EOF
+                return 0
+                ;;
+            *) echo_error "Unknown arg: $1"; return 1 ;;
+        esac
+    done
+
+    _profiler_require || return 1
+    mkdir -p "$out_dir"
+
+    local sqlite_db
+    sqlite_db=$(_profiler_sqlite_db || echo "")
+
+    local now
+    now=$(date '+%Y-%m-%d %H:%M:%S')
+
+    printf "\n"
+    printf "╔══════════════════════════════════════════════════════════════════════╗\n"
+    printf "║                          PROFILE ANALYSIS                            ║\n"
+    printf "╚══════════════════════════════════════════════════════════════════════╝\n"
+    [[ -n "$label" ]] && printf "Label:           %s\n" "$label"
+    printf "Timestamp:       %s\n" "$now"
+    printf "InfluxDB:        %s\n" "$(_profiler_influx_url)"
+    [[ -n "$sqlite_db" ]] && printf "Collector DB:    %s\n" "$sqlite_db"
+    printf "Application:     %s\n" "$(_profiler_app_binary)"
+    printf "\n"
+
+    # ---- 1. Mill structure (projection-time) -----------------------------
+    printf "── 1. MILL STRUCTURE (projection-time — JIT placement decisions) ───\n"
+    printf "  CBU/DUP      = Compute Block Units consumed by ONE duplication of the mill\n"
+    printf "  POSSIBLE-DUP = max duplications the JIT thinks could fit on the slot\n"
+    printf "  PLACED-DUP   = duplications the JIT actually placed (parallel mill copies)\n"
+    printf "  TOTAL CBU    = CBU/DUP × PLACED-DUP (your effective slot footprint)\n\n"
+    if [[ -n "$sqlite_db" ]]; then
+        local proj stats
+        proj=$(_profiler_q_sqlite "SELECT m.name, pmm.usedCbu, pmm.possibleDup, pmm.placedDup
+                                   FROM ProjectionMillMetrics pmm
+                                   JOIN Mills m ON pmm.funcIdx=m.functionIndex
+                                              AND pmm.headBbgIdx=m.headBbgIndex
+                                   WHERE m.name IS NOT NULL;")
+        if [[ -z "$proj" ]]; then
+            printf "  (no mill projections in DB — has a CPU pass + opt cycle completed?)\n"
+        else
+            printf "  %-50s  %-10s  %-12s  %-10s\n" "MILL NAME" "CBU/DUP" "POSSIBLE-DUP" "PLACED-DUP"
+            echo "$proj" | while IFS='|' read -r nm cbu pos pld; do
+                printf "  %-50s  %-10s  %-12s  %-10s\n" "$nm" "$cbu" "$pos" "$pld"
+                printf "  %-50s  %-10s  TOTAL CBU USED = %d\n" "" "" "$((cbu * pld))"
+            done
+        fi
+        printf "\n"
+
+        printf "── 2. MILL GRAPH STATS (IR shape — what the JIT compiled) ───────────\n"
+        printf "  nodeCount      = total IR nodes in the mill DAG (size of the compiled graph)\n"
+        printf "  computeCount   = arithmetic ops per mill iter (FMA, multiply, add, …)\n"
+        printf "  memAccessCount = loads + stores per mill iter (drives memory port pressure)\n"
+        printf "  feuCount       = Float Execution Unit ops — vector lanes × FP ops\n"
+        printf "  exitCount      = exit / branch points (loop exits, conditionals)\n"
+        printf "  memBWmaxBytes  = peak instantaneous memory BW per mill iter, in bytes\n\n"
+        stats=$(_profiler_q_sqlite "SELECT m.name, ms.nodeCount, ms.computeCount, ms.memAccessCount,
+                                          ms.feuCount, ms.exitCount, ms.memAccessBandwidthMaxBytes
+                                    FROM MillStatistics ms
+                                    JOIN Mills m ON ms.functionIndex=m.functionIndex
+                                                AND ms.headBbgIndex=m.headBbgIndex
+                                    WHERE m.name IS NOT NULL;")
+        echo "$stats" | while IFS='|' read -r nm nodes comp mem feu exit_c bw; do
+            [[ -z "$nm" ]] && continue
+            printf "  %s\n" "$nm"
+            printf "      nodeCount      = %-8s   computeCount   = %-8s   memAccessCount = %s\n" \
+                "$nodes" "$comp" "$mem"
+            printf "      feuCount       = %-8s   exitCount      = %-8s   memBWmaxBytes  = %s\n" \
+                "$feu" "$exit_c" "$bw"
+        done
+        printf "\n"
+
+        # ---- 2b. Per-BBG breakdown -------------------------------------
+        printf "── 2b. PER-BBG BREAKDOWN (hot basic-block groups within each mill) ──\n"
+        printf "  bbgIdx = BBG index within the function (use for source-line mapping)\n"
+        printf "  loop?  = 1 if loop head (where K-loop iteration starts)\n"
+        printf "  loc    = G grid / R risc / -  (where this BBG runs)\n"
+        printf "  height = depth of the BBG (rows of compute serially scheduled)\n"
+        printf "  width  = average parallel width (ops per row ≈ ILP available)\n"
+        printf "  nodes  = total IR nodes in this BBG\n"
+        printf "  comp   = arithmetic ops (FMA / mul / add) in this BBG\n"
+        printf "  mem    = loads + stores (memory port pressure for this BBG)\n"
+        printf "  feu    = float execution unit ops (vector lanes × FP ops)\n"
+        printf "  bw_b   = peak memory BW per iter through this BBG, in bytes\n\n"
+        local per_bbg
+        per_bbg=$(_profiler_q_sqlite "
+            SELECT m.name, bs.bbgIndex, b.isLoopHead, b.executionLocation,
+                   b.height, b.averageWidth,
+                   bs.nodeCount, bs.computeCount, bs.memAccessCount,
+                   bs.feuCount, bs.memAccessBandwidthMaxBytes
+            FROM BbgStatistics bs
+            JOIN Bbgs b  ON bs.bbgIndex = b.\"index\"
+                       AND bs.functionIndex = b.functionIndex
+                       AND bs.dialect = b.dialect
+            JOIN Mills m ON m.functionIndex = bs.functionIndex
+            WHERE bs.dialect = 'live'
+              AND m.name IS NOT NULL
+              AND bs.nodeCount > 1
+            ORDER BY m.name, bs.nodeCount DESC;")
+        if [[ -z "$per_bbg" ]]; then
+            printf "  (no non-trivial live BBGs in DB)\n"
+        else
+            local last_name=""
+            echo "$per_bbg" | while IFS='|' read -r nm idx loop loc h w nodes comp mem feu bw; do
+                [[ -z "$nm" ]] && continue
+                if [[ "$nm" != "$last_name" ]]; then
+                    printf "\n  Mill: %s\n" "$nm"
+                    printf "    %-6s  %-6s  %-3s  %-7s  %-7s  %-7s  %-5s  %-5s  %-5s  %-7s\n" \
+                        "bbgIdx" "loop?" "loc" "height" "width" "nodes" "comp" "mem" "feu" "bw_b"
+                    last_name="$nm"
+                fi
+                local short_loc="-"
+                case "$loc" in
+                    EXECUTION_LOCATION_GRID)  short_loc="G" ;;
+                    EXECUTION_LOCATION_RISC)  short_loc="R" ;;
+                esac
+                printf "    %-6s  %-6s  %-3s  %-7s  %-7s  %-7s  %-5s  %-5s  %-5s  %-7s\n" \
+                    "$idx" "$loop" "$short_loc" "${h:--}" "${w:--}" "$nodes" "$comp" "$mem" "$feu" "$bw"
+            done
+        fi
+        printf "\n"
+    fi
+
+    # ---- 3. Runtime telemetry (InfluxDB) ---------------------------------
+    printf "── 3. RUNTIME TELEMETRY (InfluxDB, full session) ────────────────────\n"
+
+    local mep_total mep_split mep_unalign hit_pf hit_nopf miss mmu_req mmu_resp
+    mep_total=$(_profiler_scalar   'SELECT SUM("counter") FROM "mepRequestsCounter"')
+    mep_split=$(_profiler_scalar   'SELECT SUM("counter") FROM "mep1stSplitCounter"')
+    mep_unalign=$(_profiler_scalar 'SELECT SUM("counter") FROM "mepUnalignedCounter"')
+    hit_pf=$(_profiler_scalar      'SELECT SUM("counter") FROM "cbuMemcipMcuHitFipAndPrefetchCounter"')
+    hit_nopf=$(_profiler_scalar    'SELECT SUM("counter") FROM "cbuMemcipMcuHitFipNoPrefetchCounter"')
+    miss=$(_profiler_scalar        'SELECT SUM("counter") FROM "cbuMemcipMcuMissCounter"')
+    mmu_req=$(_profiler_scalar     'SELECT SUM("counter") FROM "mmuReqBpCounter"')
+    mmu_resp=$(_profiler_scalar    'SELECT SUM("counter") FROM "mmuRespBackpressureCounter"')
+
+    local hbm_json hbm_rd hbm_wr hbm_idle hbm_idle_min hbm_stall hbm_maxrd hbm_samples
+    # NOTE: SQL must be single-line — _profiler_q_url_encode doesn't handle newlines.
+    hbm_json=$(_profiler_q_influx 'SELECT SUM("rdBandwidth") as rd, SUM("wrBandwidth") as wr, AVG("idlePct") as idle, AVG("stallPct") as stall, MIN("idlePct") as imin, MAX("rdBandwidth") as maxrd, COUNT(*) as n FROM hbm WHERE "idlePct" < 50' | head -1)
+    hbm_rd=$(echo       "$hbm_json" | grep -oP '"rd":[0-9.e+-]+'    | tr -d 'rd":')
+    hbm_wr=$(echo       "$hbm_json" | grep -oP '"wr":[0-9.e+-]+'    | tr -d 'wr":')
+    hbm_idle=$(echo     "$hbm_json" | grep -oP '"idle":[0-9.e+-]+'  | tr -d 'idle":')
+    hbm_idle_min=$(echo "$hbm_json" | grep -oP '"imin":[0-9.e+-]+'  | tr -d 'imin":')
+    hbm_stall=$(echo    "$hbm_json" | grep -oP '"stall":[0-9.e+-]+' | tr -d 'stall":')
+    hbm_maxrd=$(echo    "$hbm_json" | grep -oP '"maxrd":[0-9.e+-]+' | tr -d 'maxrd":')
+    hbm_samples=$(echo  "$hbm_json" | grep -oP '"n":[0-9]+'         | tr -d 'n":')
+
+    printf "  Memory port (MEP) totals:\n"
+    printf "    requests              = %s\n" "$(_profiler_human_num "$mep_total")"
+    printf "    cacheline splits      = %s\n" "$(_profiler_human_num "$mep_split")"
+    printf "    unaligned accesses    = %s\n" "$(_profiler_human_num "$mep_unalign")"
+    printf "\n  CBU L1 cache:\n"
+    printf "    hits (prefetcher)     = %s\n" "$(_profiler_human_num "$hit_pf")"
+    printf "    hits (no prefetcher)  = %s\n" "$(_profiler_human_num "$hit_nopf")"
+    printf "    misses                = %s\n" "$(_profiler_human_num "$miss")"
+    local miss_rate=""
+    if [[ -n "$hit_nopf" && -n "$miss" ]]; then
+        miss_rate=$(awk -v h="$hit_nopf" -v m="$miss" -v p="${hit_pf:-0}" 'BEGIN {
+            t=h+m+p; if(t==0){print "n/a"; exit} printf "%.1f%%", 100*m/t
+        }')
+        printf "    miss rate             = %s\n" "$miss_rate"
+    fi
+    printf "\n  MMU backpressure (lower is better, ~0 = fine):\n"
+    printf "    request bp            = %s\n" "$(_profiler_human_num "$mmu_req")"
+    printf "    response bp           = %s\n" "$(_profiler_human_num "$mmu_resp")"
+    printf "\n  HBM (active samples only, idle<50%%, n=%s):\n" "${hbm_samples:-?}"
+    printf "    avg idle %%            = %s\n" "$(awk -v v="${hbm_idle:-0}" 'BEGIN{printf "%.1f%%",v}')"
+    printf "    min idle %% (peak BW)  = %s\n" "$(awk -v v="${hbm_idle_min:-0}" 'BEGIN{printf "%.1f%%",v}')"
+    printf "    avg stall %%           = %s\n" "$(awk -v v="${hbm_stall:-0}" 'BEGIN{printf "%.4f%%",v}')"
+    printf "    peak per-chan rd      = %.2f GB/s\n" "${hbm_maxrd:-0}"
+    printf "\n"
+
+    # ---- 4. Bottleneck diagnosis -----------------------------------------
+    printf "── 4. BOTTLENECK DIAGNOSIS ──────────────────────────────────────────\n"
+    local found=0
+    if [[ -n "$hbm_stall" ]] && awk -v v="$hbm_stall" 'BEGIN{exit !(v > 5)}'; then
+        printf "  ⚠ HBM STALL %s%% — memory bus saturated.\n" "$hbm_stall"
+        printf "    → Reduce memory traffic (fuse with prior op, lower precision, reuse data).\n"
+        found=1
+    fi
+    if [[ -n "$hbm_idle" ]] && awk -v v="$hbm_idle" 'BEGIN{exit !(v > 25)}'; then
+        printf "  ⚠ HBM IDLE %s%% during active runs — memory bus underutilised.\n" \
+            "$(awk -v v="$hbm_idle" 'BEGIN{printf "%.1f",v}')"
+        printf "    → Try restructuring for more concurrent loads (TILE_M, multi-stream, more dups).\n"
+        printf "    → BUT: experiments here show that __builtin_prefetch / HIGH_THROUGHPUT often hurt;\n"
+        printf "      prefer changes that add REAL memory ops, not hints.\n"
+        found=1
+    fi
+    if [[ -n "$mep_split" ]] && awk -v v="$mep_split" 'BEGIN{exit !(v > 0)}'; then
+        printf "  ⚠ %s cacheline-split memory requests — every split costs 2 cycles.\n" \
+            "$(_profiler_human_num "$mep_split")"
+        printf "    → Align buffers / strides to 64 bytes; HIGH_THROUGHPUT split hint may help here.\n"
+        found=1
+    fi
+    if [[ -n "$mep_unalign" ]] && awk -v v="$mep_unalign" 'BEGIN{exit !(v > 0)}'; then
+        printf "  ⚠ %s unaligned memory accesses — split + extra cycles.\n" \
+            "$(_profiler_human_num "$mep_unalign")"
+        printf "    → Align loads to vector size; use aligned vector loads.\n"
+        found=1
+    fi
+    if [[ -n "$mmu_req" ]] && awk -v v="$mmu_req" 'BEGIN{exit !(v > 100000)}'; then
+        printf "  ⚠ MMU request backpressure %s — TLB/translation likely a bottleneck.\n" \
+            "$(_profiler_human_num "$mmu_req")"
+        printf "    → Use huge pages or coalesce accesses.\n"
+        found=1
+    fi
+    if [[ -n "$hit_pf" && -n "$hit_nopf" ]] && awk -v p="$hit_pf" -v h="$hit_nopf" \
+            'BEGIN{exit !(p == 0 && h > 0)}'; then
+        printf "  ⚠ Hardware prefetcher contributing 0 hits while there are cache hits.\n"
+        printf "    → On NextSilicon: don't try to 'fix' this with __builtin_prefetch — verified to hurt.\n"
+        found=1
+    fi
+    [[ "$found" -eq 0 ]] && printf "  ✓ No major flags. Kernel appears well-tuned for current HW limits.\n"
+    printf "\n"
+
+    # ---- 5. Save TSV summary --------------------------------------------
+    local tsv
+    [[ -n "$label" ]] && tsv="$out_dir/profile_${label}.tsv" \
+                       || tsv="$out_dir/profile_$(date +%Y%m%d_%H%M%S).tsv"
+    {
+        printf "metric\tvalue\n"
+        printf "label\t%s\n"               "${label:-unnamed}"
+        printf "timestamp\t%s\n"           "$now"
+        printf "application\t%s\n"         "$(_profiler_app_binary)"
+        printf "mep_requests\t%s\n"        "${mep_total:-0}"
+        printf "mep_splits\t%s\n"          "${mep_split:-0}"
+        printf "mep_unaligned\t%s\n"       "${mep_unalign:-0}"
+        printf "cache_hits_prefetch\t%s\n" "${hit_pf:-0}"
+        printf "cache_hits_no_prefetch\t%s\n" "${hit_nopf:-0}"
+        printf "cache_misses\t%s\n"       "${miss:-0}"
+        printf "miss_rate\t%s\n"          "${miss_rate:-n/a}"
+        printf "mmu_req_bp\t%s\n"         "${mmu_req:-0}"
+        printf "mmu_resp_bp\t%s\n"        "${mmu_resp:-0}"
+        printf "hbm_idle_avg_pct\t%s\n"   "${hbm_idle:-0}"
+        printf "hbm_idle_min_pct\t%s\n"   "${hbm_idle_min:-0}"
+        printf "hbm_stall_pct\t%s\n"      "${hbm_stall:-0}"
+        printf "hbm_peak_perchan_rd\t%s\n" "${hbm_maxrd:-0}"
+        printf "hbm_samples\t%s\n"        "${hbm_samples:-0}"
+    } > "$tsv"
+    echo_info "Saved TSV summary: $tsv"
+}
+
+#--------------------------------------------------------------------------
+# profile_compare — side-by-side comparison of profile_*.tsv files
+#--------------------------------------------------------------------------
+function profile_compare {
+    if [[ $# -lt 1 ]]; then
+        cat <<EOF
+profile_compare <tsv1> [tsv2 ...]   # compare 2+ profile TSVs side-by-side
+profile_compare --all                # all profile_*.tsv in PWD (newest first)
+profile_compare --latest N           # latest N profile_*.tsv
+profile_compare --diff-only ...      # hide rows where all columns equal
+EOF
+        return 1
+    fi
+
+    local diff_only=0 show_delta=1
+    local files=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)
+                mapfile -t files < <(ls -1t profile_*.tsv 2>/dev/null)
+                shift ;;
+            --latest)
+                mapfile -t files < <(ls -1t profile_*.tsv 2>/dev/null | head -n "$2")
+                shift 2 ;;
+            --diff-only) diff_only=1; shift ;;
+            --no-delta)  show_delta=0; shift ;;
+            *) files+=("$1"); shift ;;
+        esac
+    done
+
+    [[ ${#files[@]} -lt 1 ]] && { echo_error "no files"; return 1; }
+    for f in "${files[@]}"; do
+        [[ -f "$f" ]] || { echo_error "not found: $f"; return 1; }
+    done
+
+    if [[ ${#files[@]} -eq 1 ]]; then
+        echo "─ $(basename "${files[0]}") ─"
+        column -t -s $'\t' "${files[0]}"
+        return 0
+    fi
+
+    declare -a metrics=()
+    declare -A seen=()
+    for f in "${files[@]}"; do
+        while IFS=$'\t' read -r key _; do
+            [[ "$key" == "metric" || -z "$key" ]] && continue
+            [[ -z "${seen[$key]:-}" ]] && { seen[$key]=1; metrics+=("$key"); }
+        done < "$f"
+    done
+
+    declare -A val=()
+    for i in "${!files[@]}"; do
+        while IFS=$'\t' read -r key v; do
+            [[ "$key" == "metric" ]] && continue
+            val["${i}|${key}"]="$v"
+        done < "${files[$i]}"
+    done
+
+    local with_delta=0
+    [[ ${#files[@]} -eq 2 && $show_delta -eq 1 ]] && with_delta=1
+
+    local NW=24 CW=22 DW=12
+    printf "%-${NW}s" "metric"
+    for f in "${files[@]}"; do
+        local lbl
+        lbl=$(basename "$f" .tsv); lbl="${lbl#profile_}"
+        printf "  %-${CW}s" "$lbl"
+    done
+    [[ $with_delta -eq 1 ]] && printf "  %-${DW}s" "Δ (b-a)/a"
+    echo ""
+    printf "%${NW}s" '' | tr ' ' '-'
+    for _ in "${files[@]}"; do printf "  "; printf "%${CW}s" '' | tr ' ' '-'; done
+    [[ $with_delta -eq 1 ]] && { printf "  "; printf "%${DW}s" '' | tr ' ' '-'; }
+    echo ""
+
+    for k in "${metrics[@]}"; do
+        local -a vals=()
+        for i in "${!files[@]}"; do vals+=("${val["${i}|${k}"]:-}"); done
+
+        if [[ $diff_only -eq 1 ]]; then
+            local all_eq=1 first="${vals[0]}"
+            for v in "${vals[@]}"; do [[ "$v" != "$first" ]] && { all_eq=0; break; }; done
+            [[ $all_eq -eq 1 ]] && continue
+        fi
+
+        printf "%-${NW}s" "$k"
+        for v in "${vals[@]}"; do printf "  %-${CW}s" "$v"; done
+        if [[ $with_delta -eq 1 ]]; then
+            local a="${vals[0]}" b="${vals[1]}"
+            if [[ "$a" =~ ^[+-]?[0-9.eE+%-]+$ && "$b" =~ ^[+-]?[0-9.eE+%-]+$ ]]; then
+                local an=${a%\%} bn=${b%\%}
+                local pct
+                if awk -v a="$an" 'BEGIN{exit !(a+0 != 0)}'; then
+                    pct=$(awk -v a="$an" -v b="$bn" 'BEGIN{printf "%+.1f%%", 100*(b-a)/a}')
+                else
+                    pct=$(awk -v a="$an" -v b="$bn" 'BEGIN{printf "%+g", b-a}')
+                fi
+                printf "  %-${DW}s" "$pct"
+            else
+                printf "  %-${DW}s" ""
+            fi
+        fi
+        echo ""
+    done
+}
+
+#--------------------------------------------------------------------------
+# profile_extra — drill-down views
+#--------------------------------------------------------------------------
+function profile_extra {
+    case "${1:-}" in
+        hbm-dist)
+            # NOTE: SQL must be a single line — _profiler_q_influx doesn't encode newlines.
+            local lt25 v25_50 v50_75 v75 total
+            lt25=$(_profiler_scalar    'SELECT COUNT(*) FROM hbm WHERE "idlePct" < 25')
+            v25_50=$(_profiler_scalar  'SELECT COUNT(*) FROM hbm WHERE "idlePct" >= 25 AND "idlePct" < 50')
+            v50_75=$(_profiler_scalar  'SELECT COUNT(*) FROM hbm WHERE "idlePct" >= 50 AND "idlePct" < 75')
+            v75=$(_profiler_scalar     'SELECT COUNT(*) FROM hbm WHERE "idlePct" >= 75')
+            total=$(_profiler_scalar   'SELECT COUNT(*) FROM hbm')
+            lt25=${lt25:-0}; v25_50=${v25_50:-0}; v50_75=${v50_75:-0}; v75=${v75:-0}; total=${total:-0}
+
+            printf "  HBM bus-utilisation distribution\n"
+            printf "  ────────────────────────────────────────────────────────────────────────\n"
+            printf "  Each sample = one HBM telemetry tick (cadence ~10s).\n"
+            printf "  idle%% = fraction of that tick the bus had nothing in flight.\n"
+            printf "  ACTIVE samples (idle%% < 50%%) are the only ones that diagnose the kernel.\n"
+            printf "\n"
+            printf "  %-14s %10s   %s\n" "idle% bucket" "samples" "what it means"
+            printf "  %-14s %10s   %s\n" "------------" "-------" "----------------------------------------------"
+            printf "  %-14s %10s   %s\n" "[ 0%, 25%)"  "$(_profiler_human_num "$lt25")"   "HBM SATURATED — bus is the bottleneck"
+            printf "  %-14s %10s   %s\n" "[25%, 50%)"  "$(_profiler_human_num "$v25_50")" "ACTIVE, underutilised — mill isn't issuing enough"
+            printf "  %-14s %10s   %s\n" "[50%, 75%)"  "$(_profiler_human_num "$v50_75")" "kernel paused / between calls"
+            printf "  %-14s %10s   %s\n" "[75%,100%]"  "$(_profiler_human_num "$v75")"    "fully idle — no work on the bus"
+            printf "  %-14s %10s\n"      "total"       "$(_profiler_human_num "$total")"
+            printf "\n"
+
+            local active=$((lt25 + v25_50))
+            if [[ "$active" -eq 0 ]]; then
+                printf "  VERDICT: no active samples yet.\n"
+                printf "           Either no device run has happened recently, or the HBM\n"
+                printf "           sampler hasn't ticked during the active window. Re-run\n"
+                printf "           the kernel 2-3 more times and try again.\n"
+            elif [[ "$lt25" -gt 0 ]]; then
+                local sat_pct=$(awk -v a="$lt25" -v t="$active" 'BEGIN{printf "%.0f",100*a/t}')
+                printf "  VERDICT: HBM-bus-bound.\n"
+                printf "           %s%% of active samples (%s/%s) saw HBM near peak BW.\n" \
+                       "$sat_pct" "$(_profiler_human_num "$lt25")" "$(_profiler_human_num "$active")"
+                printf "           → Reduce memory traffic (precision, fusion, smaller layout).\n"
+                printf "           → Do NOT add concurrency — the bus is already full.\n"
+            else
+                printf "  VERDICT: request-issue-bound (NOT bus-bound).\n"
+                printf "           All %s active samples sit in the 25-50%% idle band — the bus\n" \
+                       "$(_profiler_human_num "$active")"
+                printf "           has spare capacity, the mill isn't filling it. Lowering\n"
+                printf "           memory traffic won't help. Try adding concurrency: TILE_M,\n"
+                printf "           multi-stream, larger inner loop. Avoid __builtin_prefetch\n"
+                printf "           and MEP HIGH_THROUGHPUT (verified harmful on this pattern).\n"
+            fi
+            ;;
+        hbm-ts)
+            # Default: ACTIVE samples (idle<50%, ordered by lowest-idle first)
+            #          — these are the moments the kernel was actually running.
+            # --all       : all samples chronologically (newest first)
+            # --chrono    : alias for --all
+            local n=40
+            local mode="active"
+            shift  # discard "hbm-ts"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --all|--chrono) mode="chrono"; shift ;;
+                    --active)       mode="active"; shift ;;
+                    [0-9]*)         n="$1"; shift ;;
+                    *) shift ;;
+                esac
+            done
+
+            local sql
+            if [[ "$mode" == "active" ]]; then
+                sql="SELECT time, \"rdBandwidth\", \"idlePct\", \"stallPct\" FROM hbm WHERE \"idlePct\" < 50 ORDER BY \"idlePct\" ASC LIMIT $n"
+            else
+                sql="SELECT time, \"rdBandwidth\", \"idlePct\", \"stallPct\" FROM hbm ORDER BY time DESC LIMIT $n"
+            fi
+            local raw
+            raw=$(_profiler_q_influx "$sql")
+            if [[ -z "$raw" ]]; then
+                if [[ "$mode" == "active" ]]; then
+                    printf "  (no active HBM samples — has a device run completed recently?)\n"
+                    printf "  Try 'profile_extra hbm-ts --all' to see all samples (mostly idle).\n"
+                else
+                    printf "  (no HBM samples in DB — run a device cycle first)\n"
+                fi
+                return 0
+            fi
+            if [[ "$mode" == "active" ]]; then
+                printf "  Top %s ACTIVE HBM samples (lowest idle%% first — peak BW moments):\n" "$n"
+            else
+                printf "  %s most recent HBM samples (newest first, mostly idle between kernel calls):\n" "$n"
+            fi
+            printf "  %-32s  %10s  %8s  %8s\n" "time" "rd GB/s" "idle %" "stall %"
+            echo "$raw" | while IFS= read -r line; do
+                local t rd idle stall
+                t=$(echo "$line"     | grep -oP '"time":"\K[^"]+')
+                rd=$(echo "$line"    | grep -oP '"rdBandwidth":\K[0-9.e+-]+')
+                idle=$(echo "$line"  | grep -oP '"idlePct":\K[0-9.e+-]+')
+                stall=$(echo "$line" | grep -oP '"stallPct":\K[0-9.e+-]+')
+                printf "  %-32s  %10.3f  %8.2f  %8.4f\n" "$t" "${rd:-0}" "${idle:-0}" "${stall:-0}"
+            done
+            ;;
+        cache-rates)
+            local hp h m
+            hp=$(_profiler_scalar 'SELECT SUM("counter") FROM "cbuMemcipMcuHitFipAndPrefetchCounter"')
+            h=$(_profiler_scalar  'SELECT SUM("counter") FROM "cbuMemcipMcuHitFipNoPrefetchCounter"')
+            m=$(_profiler_scalar  'SELECT SUM("counter") FROM "cbuMemcipMcuMissCounter"')
+            printf "  hits w/ prefetch:  %s\n" "$(_profiler_human_num "${hp:-0}")"
+            printf "  hits w/o prefetch: %s\n" "$(_profiler_human_num "${h:-0}")"
+            printf "  misses:            %s\n" "$(_profiler_human_num "${m:-0}")"
+            awk -v hp="${hp:-0}" -v h="${h:-0}" -v m="${m:-0}" \
+                'BEGIN{t=hp+h+m; if(t>0){printf "  total:             %s, miss%%: %.1f%%, pf-hit%%: %.2f%%\n", t, 100*m/t, 100*hp/t}}'
+            ;;
+        mill)
+            # SQLite returns "<name>||<slot>" when threadCapacity is NULL (common).
+            # Use IFNULL + IFNULL to substitute a readable placeholder.
+            local rows
+            rows=$(_profiler_q_sqlite "SELECT name, IFNULL(threadCapacity, '-'), IFNULL(slotIndex, '-') FROM Mills WHERE name IS NOT NULL;")
+            if [[ -z "$rows" ]]; then
+                printf "  (no mills in DB — has a CPU pass + opt cycle completed?)\n"
+                return 0
+            fi
+            printf "  %-50s  %-15s  %-10s\n" "MILL NAME" "THREAD-CAP" "SLOT-IDX"
+            echo "$rows" | awk -F'|' '{ printf "  %-50s  %-15s  %-10s\n", $1, $2, $3 }'
+            ;;
+        bbg)
+            # Per-BBG breakdown — hot basic-block groups within each mill, with stats.
+            # Optional arg: limit to top N by nodeCount (default = all non-trivial).
+            local limit="${2:-1000}"
+            local rows
+            rows=$(_profiler_q_sqlite "
+                SELECT m.name, bs.bbgIndex, b.isLoopHead, b.executionLocation,
+                       b.height, b.averageWidth,
+                       bs.nodeCount, bs.computeCount, bs.memAccessCount,
+                       bs.feuCount, bs.memAccessBandwidthMaxBytes
+                FROM BbgStatistics bs
+                JOIN Bbgs b  ON bs.bbgIndex = b.\"index\"
+                           AND bs.functionIndex = b.functionIndex
+                           AND bs.dialect = b.dialect
+                JOIN Mills m ON m.functionIndex = bs.functionIndex
+                WHERE bs.dialect = 'live'
+                  AND m.name IS NOT NULL
+                  AND bs.nodeCount > 1
+                ORDER BY m.name, bs.nodeCount DESC
+                LIMIT $limit;")
+            if [[ -z "$rows" ]]; then
+                printf "  (no non-trivial live BBGs in DB — has a CPU pass + opt cycle completed?)\n"
+                return 0
+            fi
+            local last_name=""
+            echo "$rows" | while IFS='|' read -r nm idx loop loc h w nodes comp mem feu bw; do
+                [[ -z "$nm" ]] && continue
+                if [[ "$nm" != "$last_name" ]]; then
+                    printf "\n  Mill: %s\n" "$nm"
+                    printf "    %-6s  %-6s  %-3s  %-7s  %-7s  %-7s  %-5s  %-5s  %-5s  %-7s\n" \
+                        "bbgIdx" "loop?" "loc" "height" "width" "nodes" "comp" "mem" "feu" "bw_b"
+                    last_name="$nm"
+                fi
+                local short_loc="-"
+                case "$loc" in
+                    EXECUTION_LOCATION_GRID)  short_loc="G" ;;
+                    EXECUTION_LOCATION_RISC)  short_loc="R" ;;
+                esac
+                printf "    %-6s  %-6s  %-3s  %-7s  %-7s  %-7s  %-5s  %-5s  %-5s  %-7s\n" \
+                    "$idx" "$loop" "$short_loc" "${h:--}" "${w:--}" "$nodes" "$comp" "$mem" "$feu" "$bw"
+            done
+            ;;
+        all)
+            for s in hbm-dist hbm-ts cache-rates mill bbg; do
+                printf "\n── %s ──\n" "$s"; profile_extra "$s"
+            done ;;
+        *|-h|--help)
+            cat <<EOF
+profile_extra hbm-dist                 # HBM idle% distribution buckets (all samples)
+profile_extra hbm-ts [N]               # top N ACTIVE HBM samples (idle<50%, lowest-idle first) — default 40
+profile_extra hbm-ts --all [N]         # last N samples chronologically (mostly idle between calls)
+profile_extra cache-rates              # cache hit/miss with %
+profile_extra mill                     # per-mill list (NULL thread-cap shown as '-')
+profile_extra bbg [N]                  # per-BBG breakdown of each mill, sorted by hottest first (default top 1000)
+profile_extra all                      # run all the above (hbm-ts in active mode)
+EOF
+            ;;
+    esac
+}
+
+#--------------------------------------------------------------------------
+# profile_experiment — two-phase wrapper (small warmup → big measurement)
+#--------------------------------------------------------------------------
+function profile_experiment {
+    local label=""
+    local warmup_cmd=""
+    local measure_cmd=""
+    local out_dir="$_PROFILER_OUT_DIR_DEFAULT"
+    local cfg=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --label)    label="$2"; shift 2 ;;
+            --warmup)   warmup_cmd="$2"; shift 2 ;;
+            --measure)  measure_cmd="$2"; shift 2 ;;
+            --cfg-file) cfg="$2"; shift 2 ;;
+            --out-dir)  out_dir="$2"; shift 2 ;;
+            -h|--help)
+                cat <<EOF
+profile_experiment --label X --warmup '<cmd>' --measure '<cmd>'
+                   [--cfg-file PATH] [--out-dir DIR]
+
+  Runs <warmup_cmd> via run_nextloader (small workload → triggers CPU
+  pass + opt → mill projected), then <measure_cmd> (big workload →
+  device run with full iters). Both commands are everything AFTER 'nextloader
+  --cfg-file CFG --'. Saves run output to run_<label>{,_cpupass}.txt and
+  invokes profile_analyze --label <label>.
+
+Example:
+  profile_experiment --label myexp \\
+      --warmup  './app gemv m=2048 n=2048 --iters 50 --device' \\
+      --measure './app gemv m=8192 n=28672 --iters 2000 --device'
+EOF
+                return 0 ;;
+            *) echo_error "Unknown arg: $1"; return 1 ;;
+        esac
+    done
+
+    [[ -z "$label" || -z "$warmup_cmd" || -z "$measure_cmd" ]] && {
+        echo_error "label, --warmup, --measure all required"; return 1
+    }
+    _profiler_require || return 1
+    mkdir -p "$out_dir"
+
+    # Auto-detect cfg from running nextoptd if not given
+    if [[ -z "$cfg" ]]; then
+        cfg=$(ps -ef | grep -oP 'nextoptd.*?--cfg-file \K[^ ]+' | head -1)
+        [[ -z "$cfg" ]] && { echo_error "--cfg-file not given and not auto-detectable"; return 1; }
+    fi
+
+    local run_file="$out_dir/run_${label}.txt"
+    local cpupass_file="$out_dir/run_${label}_cpupass.txt"
+
+    echo_info "═══ profile_experiment label=$label ═══"
+    echo_info "cfg-file: $cfg"
+    echo ""
+
+    # Phase A — small workload, host CPU pass + opt
+    echo_running "Phase A — CPU pass + opt (warmup, small workload)"
+    nextcli application clear > /dev/null 2>&1
+    for _ in $(seq 1 30); do
+        local st
+        st=$(nextcli application status 2>&1 | awk '/Optimization state:/{print $3}')
+        [[ "$st" == "IDLE" ]] && break
+        sleep 2
+    done
+    bash -ilc "run_nextloader nextloader --cfg-file $cfg -- $warmup_cmd" > "$cpupass_file" 2>&1
+    local opt_state
+    opt_state=$(nextcli application status 2>&1 | awk '/Optimization state:/{print $3}')
+    echo_info "post-opt state: $opt_state"
+
+    # Phase B — big workload, device run
+    echo_running "Phase B — device measurement (big workload)"
+    bash -ilc "run_nextloader nextloader --cfg-file $cfg -- $measure_cmd" > "$run_file" 2>&1
+    local best
+    best=$(grep -oP 'best\s*=\s*\K[0-9.]+\s*GFLOP/s\s*\(\s*[0-9.]+\s*GB/s' "$run_file" | tail -1)
+    [[ -n "$best" ]] && echo_success "Best: $best" || echo_warning "(no perf line; see $run_file)"
+
+    # Phase C — analyze
+    echo_running "Phase C — profile analysis"
+    profile_analyze --label "$label" --out-dir "$out_dir"
+
+    echo_success "═══ DONE: $label ═══"
+}
+
+#--------------------------------------------------------------------------
+# menu-profiler — interactive
+#--------------------------------------------------------------------------
+function menu-profiler {
+    echo ""
+    echo "==================menu-profiler================="
+    echo "0. exit"
+    echo "1. profile_analyze (current run state)"
+    echo "2. profile_compare (latest 2 TSVs in PWD)"
+    echo "3. profile_extra hbm-dist"
+    echo "4. profile_extra cache-rates"
+    echo "5. profile_extra mill"
+    echo "6. profile_extra bbg  (per-BBG breakdown)"
+    echo "7. profile_extra all"
+    echo "8. profile_experiment (interactive prompts)"
+    echo "9. show profile out-dir + recent TSVs"
+    echo "===================menu-profiler================"
+    read -p "Select an option: " option
+    case "$option" in
+        0)  return 0 ;;
+        1)  read -p "label (optional): " l
+            [[ -n "$l" ]] && profile_analyze --label "$l" || profile_analyze
+            menu-profiler ;;
+        2)  profile_compare --latest 2; menu-profiler ;;
+        3)  profile_extra hbm-dist; menu-profiler ;;
+        4)  profile_extra cache-rates; menu-profiler ;;
+        5)  profile_extra mill; menu-profiler ;;
+        6)  profile_extra bbg; menu-profiler ;;
+        7)  profile_extra all; menu-profiler ;;
+        8)  read -p "label: " l
+            read -p "warmup cmd (after 'nextloader ... --'): " w
+            read -p "measure cmd: " m
+            profile_experiment --label "$l" --warmup "$w" --measure "$m"
+            menu-profiler ;;
+        9)  echo_info "Out dir: $_PROFILER_OUT_DIR_DEFAULT"
+            ls -lat "$_PROFILER_OUT_DIR_DEFAULT"/profile_*.tsv 2>/dev/null | head -10
+            menu-profiler ;;
+        *)  echo "Invalid"; menu-profiler ;;
+    esac
+}
+
+echo_info "Loading menu-profiler ..."

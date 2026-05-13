@@ -15,6 +15,7 @@ function menu() {
   echo "7. Known parameters"
   echo "8. Activate Python virtual environment"
   echo "9. enter menu-claude"
+  echo "10. enter menu-profiler"
   echo "=====================menu===================="
   
   read -p "Select an option: " option
@@ -72,6 +73,9 @@ function menu() {
       ;;
     9)
       menu-claude
+      ;;
+    10)
+      menu-profiler
       ;;
     *)
       echo "Invalid option. Please try again."
