@@ -225,51 +225,79 @@ function _history_add {
 
 _history_selection=""
 
+# _history_menu FILE TITLE
+#
+# Default (project mode): shows only entries whose stored cwd matches the
+# current directory. The cwd is not repeated in the list — just the commands.
+#
+# Press 'a' to switch to all-projects view, which groups entries by project.
+# Press 'p' to return to project mode.
 function _history_menu {
     local file="$1"
     local title="$2"
     _history_selection=""
 
-    if [[ ! -f "$file" ]] || [[ ! -s "$file" ]]; then
-        return 1
-    fi
+    [[ ! -f "$file" ]] || [[ ! -s "$file" ]] && return 1
+
+    local norm_pwd
+    norm_pwd=$(_history_normalize_path "$PWD")
+
+    local show_all=0
 
     while true; do
         echo ""
-        echo_info "Recent $title:"
+        local -a entries=()
         local i=1
-        local entries=()
-        while IFS= read -r line; do
-            if [[ "$line" == *$'\t'* ]]; then
+
+        if [[ "$show_all" -eq 0 ]]; then
+            echo_info "$title  ${MAGENTA}[$norm_pwd]${NC}"
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
                 local _hdir="${line%%$'\t'*}"
-                local _hrest="${line#*$'\t'}"
-                echo -e "  ${CYAN}$i.${NC} ${MAGENTA}[$_hdir]${NC}"
-                echo -e "      $_hrest"
-            else
-                echo -e "  ${CYAN}$i.${NC} $line"
-            fi
-            entries+=("$line")
-            ((i++))
-        done < "$file"
-        echo -e "  ${YELLOW}0.${NC} Enter manually"
-        echo -e "  ${RED}d<num>.${NC} Delete history entry (e.g. d1)"
+                [[ "$_hdir" != "$norm_pwd" ]] && continue
+                local _hcmd="${line#*$'\t'}"
+                echo -e "  ${CYAN}$i.${NC} $_hcmd"
+                entries+=("$line")
+                ((i++))
+            done < "$file"
+            [[ ${#entries[@]} -eq 0 ]] && echo_warning "  (no history for this project yet)"
+            echo -e "  ${YELLOW}0.${NC} Enter manually"
+            echo -e "  ${RED}d<N>${NC} Delete entry (e.g. d1)   ${CYAN}a${NC} All projects"
+        else
+            echo_info "$title  (all projects)"
+            local _last_dir=""
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                local _hdir="${line%%$'\t'*}"
+                local _hcmd="${line#*$'\t'}"
+                if [[ "$_hdir" != "$_last_dir" ]]; then
+                    echo ""
+                    echo -e "  ${MAGENTA}[$_hdir]${NC}"
+                    _last_dir="$_hdir"
+                fi
+                echo -e "    ${CYAN}$i.${NC} $_hcmd"
+                entries+=("$line")
+                ((i++))
+            done < "$file"
+            echo -e "  ${YELLOW}0.${NC} Enter manually"
+            echo -e "  ${RED}d<N>${NC} Delete entry   ${CYAN}p${NC} Current project only"
+        fi
         echo ""
 
         read -p "Selection: " choice
 
-        if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
-            return 1
-        fi
+        [[ "$choice" == "0" ]] || [[ -z "$choice" ]] && return 1
+        [[ "$choice" == "a" ]] && { show_all=1; continue; }
+        [[ "$choice" == "p" ]] && { show_all=0; continue; }
 
         if [[ "$choice" =~ ^d([0-9]+)$ ]]; then
             local del_idx="${BASH_REMATCH[1]}"
             if [[ "$del_idx" -ge 1 && "$del_idx" -le ${#entries[@]} ]]; then
                 local to_del="${entries[$((del_idx-1))]}"
-                local tmp
-                tmp=$(mktemp)
+                local tmp; tmp=$(mktemp)
                 grep -Fxv "$to_del" "$file" > "$tmp"
                 mv "$tmp" "$file"
-                echo_success "Removed: $to_del"
+                echo_success "Removed entry"
                 [[ ! -s "$file" ]] && return 1
                 continue
             fi
