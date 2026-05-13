@@ -77,6 +77,43 @@ launched from a different directory via `run_pipeline`).
 | 12  | `run_pipeline` — start nextsystemd in **background** + nextloader + print profiler link |
 | 13  | `_nextsystemd_bg_stop` — kill the background nextsystemd                                 |
 | 14  | `_nextsystemd_bg_log` — dump the captured log                                            |
+| 15  | `menu-batch` — run / create / manage saved command sequences (see below)                 |
+
+## Batch runs (option 15 → `menu-batch`)
+
+A **batch** is a named, ordered sequence of `nextloader` commands saved to
+`~/env/.batches/<name>`. Use it when you run the same set of shapes (or
+variants) repeatedly on the same nextsystemd session.
+
+### How it works
+
+- nextsystemd must already be running (start it via option 12 first).
+  `run_batch` warns if no background nextsystemd is detected but lets you
+  proceed (you may have a standalone nextsystemd not tracked by the PID file).
+- Each step calls `run_nextloader` in order. The first step triggers the
+  CPU pass + optimization; subsequent steps sharing the same binary are
+  already OPTIMIZED and skip the CPU pass automatically.
+- On step failure you're asked whether to continue or abort.
+
+### Building a batch (option 2 inside `menu-batch`)
+
+1. Give it a name.
+2. Repeat until done:
+   - **`h`** — pick a command from history (project-filtered, falls back to all-projects)
+   - **`e`** — type a `nextloader` command manually (cwd = current directory)
+   - **`r`** — remove the last-added step
+   - **`done`** — save
+   - **`cancel`** — discard
+3. All commands are normalized automatically (env-var tokens, `./` relative paths)
+   so the batch remains valid after directory or `SHARED_SPACE_NAME` changes.
+
+### Calling functions directly
+
+| Intent                         | Function                            |
+|--------------------------------|-------------------------------------|
+| Run a saved batch              | `run_batch "<name>"`                |
+| Enter the batch builder wizard | `_batch_create_interactive`         |
+| List saved batch names         | `_batch_list`                       |
 
 ## How the optimize pipeline works (option 10 / 12)
 

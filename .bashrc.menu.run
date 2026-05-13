@@ -7,6 +7,7 @@ _HISTORY_NEXTSYSTEMD="${_ENV_PROJECT_DIR}/.history_nextsystemd"
 _HISTORY_NEXTLOADER="${_ENV_PROJECT_DIR}/.history_nextloader"
 _NEXTSYSTEMD_PID_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.pid"
 _NEXTSYSTEMD_LOG_FILE="${_ENV_PROJECT_DIR}/.nextsystemd.log"
+_BATCHES_DIR="${_ENV_PROJECT_DIR}/.batches"
 
 # Normalize a single absolute path: replace longest-matching env-var prefix.
 # $1=path  $2=cwd (optional; if set and path is under cwd, produce ./ form instead)
@@ -322,7 +323,250 @@ function _history_menu {
 }
 
 function webserver_cleanup {
-  echo_error " TODO: add this" 
+  echo_error " TODO: add this"
+}
+
+#--------------------------------------------------------------------------
+# Batch runs — save a named sequence of nextloader commands and run them
+# in order on an already-running nextsystemd.
+#
+# Batches are stored as plain files in $_BATCHES_DIR/<name>.
+# Each line is a normalized cwd<TAB>cmd entry (same format as history).
+#--------------------------------------------------------------------------
+
+function _batch_list {
+    [[ -d "$_BATCHES_DIR" ]] || return 1
+    ls -1 "$_BATCHES_DIR" 2>/dev/null
+}
+
+# _batch_pick_menu — interactive picker: returns 0 + sets _batch_pick_result
+# to the selected batch name, or returns 1 if cancelled.
+_batch_pick_result=""
+function _batch_pick_menu {
+    local -a batches=()
+    while IFS= read -r b; do batches+=("$b"); done < <(_batch_list 2>/dev/null)
+    if [[ ${#batches[@]} -eq 0 ]]; then
+        echo_warning "No saved batches yet. Create one with option 2."
+        return 1
+    fi
+    local i=1
+    for b in "${batches[@]}"; do
+        local n; n=$(grep -c '' "$_BATCHES_DIR/$b" 2>/dev/null || echo 0)
+        local proj=""
+        local first; first=$(head -1 "$_BATCHES_DIR/$b" 2>/dev/null)
+        [[ "$first" == *$'\t'* ]] && proj="  ${MAGENTA}[${first%%$'\t'*}]${NC}"
+        echo -e "  ${CYAN}$i.${NC} ${bldwht}$b${NC}  ($n steps)$proj"
+        ((i++))
+    done
+    echo -e "  ${YELLOW}0.${NC} Cancel"
+    echo ""
+    read -p "Select batch: " choice
+    [[ "$choice" == "0" ]] || [[ -z "$choice" ]] && return 1
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#batches[@]} ]]; then
+        _batch_pick_result="${batches[$((choice-1))]}"
+        return 0
+    fi
+    echo_error "Invalid selection"; return 1
+}
+
+# run_batch NAME — run all steps of a saved batch in order.
+# Assumes nextsystemd is already running.
+function run_batch {
+    local batch_name="$1"
+    local batch_file="$_BATCHES_DIR/$batch_name"
+    [[ ! -f "$batch_file" ]] && { echo_error "Batch not found: $batch_name"; return 1; }
+
+    local total; total=$(grep -c '' "$batch_file")
+    echo ""
+    echo -e "${bldcyn}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${bldcyn}║  BATCH: ${batch_name}${NC}"
+    printf "${bldcyn}║  %d steps — using existing nextsystemd   ${NC}\n" "$total"
+    echo -e "${bldcyn}╚══════════════════════════════════════════╝${NC}"
+    echo ""
+
+    if ! _nextsystemd_bg_is_running; then
+        echo_warning "Background nextsystemd does not appear to be running."
+        echo_warning "The batch will still run but optimization polling may hang if"
+        echo_warning "no nextsystemd is active. Continue? (y/n)"
+        read -r _cont
+        [[ "$_cont" != "y" && "$_cont" != "Y" ]] && return 1
+    fi
+
+    local n=0 _saved_pwd="$PWD" _failed=0
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        ((n++))
+
+        local entry_dir="" entry_cmd=""
+        if [[ "$entry" == *$'\t'* ]]; then
+            entry_dir="${entry%%$'\t'*}"
+            entry_cmd="${entry#*$'\t'}"
+        else
+            entry_cmd="$entry"
+        fi
+
+        echo -e "${bldcyn}── Step $n / $total ─────────────────────────────────────────────${NC}"
+
+        local exp_dir=""
+        [[ -n "$entry_dir" ]] && exp_dir=$(_history_expand_path "$entry_dir")
+        if [[ -n "$exp_dir" && -d "$exp_dir" ]]; then
+            cd "$exp_dir"
+        fi
+
+        run_nextloader $entry_cmd
+        local rc=$?
+        cd "$_saved_pwd"
+
+        if [[ $rc -ne 0 ]]; then
+            echo_error "Step $n failed (exit $rc)."
+            read -p "Continue with remaining steps? (y/n): " _cont
+            [[ "$_cont" != "y" && "$_cont" != "Y" ]] && { _failed=1; break; }
+        fi
+    done < "$batch_file"
+
+    echo ""
+    if [[ "$_failed" -eq 0 ]]; then
+        echo_success "Batch '$batch_name' complete ($n / $total steps ran)"
+    else
+        echo_error "Batch '$batch_name' aborted at step $n"
+    fi
+}
+
+# _batch_create_interactive — wizard to build and save a new batch.
+function _batch_create_interactive {
+    read -p "Batch name (no spaces): " bname
+    bname="${bname// /_}"
+    [[ -z "$bname" ]] && { echo_error "Name required"; return 1; }
+
+    mkdir -p "$_BATCHES_DIR"
+    local batch_file="$_BATCHES_DIR/$bname"
+
+    if [[ -f "$batch_file" ]]; then
+        local existing; existing=$(grep -c '' "$batch_file" 2>/dev/null || echo 0)
+        echo_warning "Batch '$bname' already exists ($existing steps)."
+        echo "  1. Append to it   2. Overwrite   0. Cancel"
+        read -p "Choice: " ow
+        case "$ow" in
+            2) > "$batch_file" ;;
+            1) ;;
+            *) echo_info "Cancelled"; return 0 ;;
+        esac
+    fi
+
+    echo_info "Building batch '$bname'. Commands added so far:"
+    echo_info "  h = pick from history   e = enter manually   done = save   cancel = discard"
+    echo ""
+
+    while true; do
+        local count; count=$(grep -c '' "$batch_file" 2>/dev/null || echo 0)
+        echo -e "${CYAN}── Current batch: $bname ($count steps) ──────────────────────────${NC}"
+        if [[ "$count" -gt 0 ]]; then
+            local n=0
+            while IFS= read -r line; do
+                ((n++))
+                local _hdir="${line%%$'\t'*}"
+                local _hcmd="${line#*$'\t'}"
+                echo -e "  ${CYAN}$n.${NC} ${MAGENTA}[$_hdir]${NC}"
+                echo -e "       $_hcmd"
+            done < "$batch_file"
+        fi
+        echo ""
+        read -p "[h]istory  [e]nter manually  [r]emove last  [done]  [cancel]: " action
+
+        case "$action" in
+            h|H)
+                if _history_menu "$_HISTORY_NEXTLOADER" "pick for batch"; then
+                    local norm; norm=$(_history_normalize_entry "$_history_selection")
+                    echo "$norm" >> "$batch_file"
+                    echo_success "Added: ${_history_selection#*$'\t'}"
+                fi ;;
+            e|E)
+                echo_info "Enter the full nextloader command (cwd will be current dir: $PWD):"
+                read -r manual_cmd
+                if [[ -n "$manual_cmd" ]]; then
+                    local norm; norm=$(_history_normalize_entry "$(pwd)"$'\t'"$manual_cmd")
+                    echo "$norm" >> "$batch_file"
+                    echo_success "Added: $manual_cmd"
+                fi ;;
+            r|R)
+                if [[ "$count" -gt 0 ]]; then
+                    local tmp; tmp=$(mktemp)
+                    head -n $(( count - 1 )) "$batch_file" > "$tmp"
+                    mv "$tmp" "$batch_file"
+                    echo_success "Removed last step"
+                else
+                    echo_warning "Nothing to remove"
+                fi ;;
+            done|DONE)
+                local final; final=$(grep -c '' "$batch_file" 2>/dev/null || echo 0)
+                if [[ "$final" -eq 0 ]]; then
+                    echo_warning "Batch is empty — nothing saved."
+                    rm -f "$batch_file"
+                else
+                    echo_success "Saved batch '$bname' with $final steps"
+                fi
+                return 0 ;;
+            cancel|CANCEL)
+                rm -f "$batch_file"
+                echo_info "Cancelled — batch discarded."
+                return 0 ;;
+            *)
+                echo_error "Unknown action. Use h / e / r / done / cancel" ;;
+        esac
+    done
+}
+
+function menu-batch {
+    echo ""
+    echo "==================menu-batch==================="
+    echo "0. Back"
+    echo "1. Run a saved batch"
+    echo "2. Create a new batch"
+    echo "3. List batches and their steps"
+    echo "4. Delete a batch"
+    echo "================================================"
+    read -p "Select an option: " option
+    case "$option" in
+        0) return 0 ;;
+        1)
+            echo ""
+            if _batch_pick_menu; then
+                run_batch "$_batch_pick_result"
+            fi
+            menu-batch ;;
+        2)
+            _batch_create_interactive
+            menu-batch ;;
+        3)
+            if ! _batch_list >/dev/null 2>&1; then
+                echo_warning "No saved batches."
+            else
+                while IFS= read -r b; do
+                    local n; n=$(grep -c '' "$_BATCHES_DIR/$b" 2>/dev/null || echo 0)
+                    echo ""
+                    echo -e "  ${bldcyn}=== $b ($n steps) ===${NC}"
+                    local i=0
+                    while IFS= read -r line; do
+                        ((i++))
+                        local _hdir="${line%%$'\t'*}"
+                        local _hcmd="${line#*$'\t'}"
+                        echo -e "    ${CYAN}$i.${NC} ${MAGENTA}[$_hdir]${NC}"
+                        echo -e "        $_hcmd"
+                    done < "$_BATCHES_DIR/$b"
+                done < <(_batch_list)
+            fi
+            menu-batch ;;
+        4)
+            echo ""
+            if _batch_pick_menu; then
+                rm -f "$_BATCHES_DIR/$_batch_pick_result"
+                echo_success "Deleted batch '$_batch_pick_result'"
+            fi
+            menu-batch ;;
+        *)
+            echo "Invalid option"
+            menu-batch ;;
+    esac
 }
 
 function run_nextsystemd {
@@ -612,6 +856,8 @@ function menu-run() {
   echo "13. pipeline:   stop background nextsystemd"
   echo "14. pipeline:   show background nextsystemd log"
   echo ""
+  echo "15. batch:      run / create / manage saved command sequences"
+  echo ""
   echo "================================================"
   
   read -p "Select an option: " option
@@ -701,6 +947,10 @@ function menu-run() {
       ;;
     14)
       _nextsystemd_bg_log
+      menu-run
+      ;;
+    15)
+      menu-batch
       menu-run
       ;;
     *)
