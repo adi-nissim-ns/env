@@ -352,10 +352,17 @@ function _batch_pick_menu {
     local i=1
     for b in "${batches[@]}"; do
         local n; n=$(grep -c '' "$_BATCHES_DIR/$b" 2>/dev/null || echo 0)
-        local proj=""
         local first; first=$(head -1 "$_BATCHES_DIR/$b" 2>/dev/null)
-        [[ "$first" == *$'\t'* ]] && proj="  ${MAGENTA}[${first%%$'\t'*}]${NC}"
+        local proj=""
+        [[ "$first" == *$'\t'* ]] && proj=" ${MAGENTA}[${first%%$'\t'*}]${NC}"
         echo -e "  ${CYAN}$i.${NC} ${bldwht}$b${NC}  ($n steps)$proj"
+        local step=1
+        while IFS= read -r line; do
+            local _hcmd="${line#*$'\t'}"
+            echo -e "       ${step}. $_hcmd"
+            ((step++))
+        done < "$_BATCHES_DIR/$b"
+        echo ""
         ((i++))
     done
     echo -e "  ${YELLOW}0.${NC} Cancel"
