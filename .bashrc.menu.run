@@ -75,6 +75,10 @@ function _history_normalize_entry {
         norm_cmd=$(printf '%s' "$norm_cmd" | sed "s|${_esc}/|\$SPACE_PATH|g; s|${_esc}|\$SPACE_PATH|g")
     fi
 
+    # Normalize bare (no / . $) cfg-file args to ./relative so
+    # "next_runtime.conf" and "./next_runtime.conf" are the same entry.
+    norm_cmd=$(printf '%s' "$norm_cmd" | sed 's|--cfg-file \([^/.$][^ ]*\)|--cfg-file ./\1|g')
+
     echo "${norm_cwd}"$'\t'"${norm_cmd}"
 }
 
