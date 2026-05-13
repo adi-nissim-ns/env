@@ -121,6 +121,45 @@ window**. You'll see `n=0` and `idlePct=0.0%` in the report — misleading.
 then re-run `profile_analyze --label X`. The function reads the
 InfluxDB cumulative state, so each new device run adds to it.
 
+## HBM schema clarification (events, not periodic samples)
+
+The `hbm` table is a **stream of per-bank access events**, not a periodic
+sampler. During an active device run you get sub-ms rows (one row per
+HBM bank per memory event); between runs you get mostly-idle rows at
+much sparser cadence. So:
+
+- A single device call shows up as a **burst** of HBM rows
+  (typically tens-to-hundreds of rows in a few hundred ms).
+- The aggregate read bandwidth for a single tick =
+  **SUM of `rdBandwidth` across all rows sharing that timestamp**
+  (each row's value is per-bank).
+- `idlePct` is per-bank-tick; averaging across rows of the same
+  timestamp gives the bus-level idle %.
+
+This matters when you run the same kernel many times — each device call
+contributes its own burst, and `profile_extra hbm-dist` aggregates them
+all into one histogram. To see one device call at a time (and the
+overhead between calls), use:
+
+```bash
+profile_extra runs [N]              # default last 10 runs
+profile_extra runs --gap 1.0        # tweak run-boundary threshold (seconds)
+```
+
+The `runs` output reports, per device call: wall-clock duration of the
+active window, number of HBM ticks captured, peak/avg aggregate BW,
+and min/avg bus idle %. It also reports the **gap** between runs, which
+quantifies host overhead (edit/build/load, next-loader startup, opt-pass
+re-run, slot reassignment, page-cache warm-up).
+
+**When to prefer `runs` over `hbm-dist`:**
+- Comparing behavior across runs that may differ in shape, slot
+  placement, or compile state — aggregate hides per-run variance.
+- Quantifying iteration overhead (gap_s between runs) when iterating
+  on a kernel.
+- Sanity-checking that a measured BW reflects steady-state, not a
+  cold-start outlier.
+
 ## Counter cheat-sheet (sqlite + influx tables it reads)
 
 | Section | Source | Tables |
@@ -192,7 +231,9 @@ profile_experiment --label tile_m2_u3 \
     --measure './build/bin/next-dnn-cli gemv_add_packed m=8192 n=28672 --iters 2000 --device --peak-bw 800'
 
 # Drill in on a specific metric class:
-profile_extra hbm-dist        # HBM idle% buckets
+profile_extra hbm-dist        # HBM idle% buckets (aggregate across all runs)
+profile_extra runs            # per-run BW + inter-run gap overhead
 profile_extra cache-rates     # detailed cache hit/miss
 profile_extra mill            # all projected mills
+profile_extra bbg             # per-BBG breakdown of each mill
 ```

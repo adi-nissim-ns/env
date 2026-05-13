@@ -482,8 +482,9 @@ function profile_extra {
 
             printf "  HBM bus-utilisation distribution\n"
             printf "  ────────────────────────────────────────────────────────────────────────\n"
-            printf "  Each sample = one HBM telemetry tick (cadence ~10s).\n"
-            printf "  idle%% = fraction of that tick the bus had nothing in flight.\n"
+            printf "  Each sample = one HBM access-event row (one per bank per ms during a\n"
+            printf "  device run, then mostly-idle rows between runs).\n"
+            printf "  idle%% = fraction of the sample window the bus had nothing in flight.\n"
             printf "  ACTIVE samples (idle%% < 50%%) are the only ones that diagnose the kernel.\n"
             printf "\n"
             printf "  %-14s %10s   %s\n" "idle% bucket" "samples" "what it means"
@@ -517,6 +518,10 @@ function profile_extra {
                 printf "           multi-stream, larger inner loop. Avoid __builtin_prefetch\n"
                 printf "           and MEP HIGH_THROUGHPUT (verified harmful on this pattern).\n"
             fi
+            printf "\n"
+            printf "  NOTE: numbers above aggregate ALL device runs in the DB. To see\n"
+            printf "        behavior *per run* (and the host overhead between runs), use:\n"
+            printf "          profile_extra runs\n"
             ;;
         hbm-ts)
             # Default: ACTIVE samples (idle<50%, ordered by lowest-idle first)
@@ -632,19 +637,142 @@ function profile_extra {
                     "$idx" "$loop" "$short_loc" "${h:--}" "${w:--}" "$nodes" "$comp" "$mem" "$feu" "$bw"
             done
             ;;
+        runs)
+            # Cluster active HBM rows (idlePct < 50) into discrete "runs" using a
+            # time-gap threshold (default 1s — HBM sampling is sub-ms during
+            # active windows, so any gap > 1s is between separate device runs).
+            # Reports per-run stats (aggregated across all rows at each timestamp)
+            # and the idle gap between runs (host overhead).
+            local n=10
+            local gap_thresh="1.0"
+            shift  # discard "runs"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --gap)        gap_thresh="$2"; shift 2 ;;
+                    [0-9]*)       n="$1"; shift ;;
+                    *) shift ;;
+                esac
+            done
+
+            # Per-timestamp aggregate: BW summed across rows, idle averaged.
+            local raw
+            raw=$(_profiler_q_influx 'SELECT time, SUM("rdBandwidth") AS bw, AVG("idlePct") AS idle, AVG("stallPct") AS stall, COUNT(*) AS rows FROM hbm WHERE "idlePct" < 50 GROUP BY time ORDER BY time ASC')
+            if [[ -z "$raw" ]]; then
+                printf "  (no active HBM samples in DB — run a device cycle first)\n"
+                return 0
+            fi
+
+            printf "  PER-RUN HBM ACTIVITY (last %s runs, gap > %ss = new run)\n" "$n" "$gap_thresh"
+            printf "  -----------------------------------------------------------------------\n"
+            printf "  A 'run' = a burst of active timestamps (HBM samples with idle%% < 50%%).\n"
+            printf "  Each row in the table aggregates one device kernel call.\n"
+            printf "  agg_BW = SUM of per-event read bandwidth across all rows at each\n"
+            printf "           timestamp, averaged over the burst (GB/s on the bus).\n"
+            printf "\n"
+
+            echo "$raw" | gawk -v n="$n" -v gap_thresh="$gap_thresh" '
+                function to_epoch(rfc,   parts, base, frac, dt_parts, n_parts) {
+                    # rfc = "2026-05-13T09:18:32.509293427" or "...Z"
+                    sub("T", " ", rfc); sub("Z$", "", rfc)
+                    n_parts = split(rfc, parts, ".")
+                    # parts[1] = "2026-05-13 09:18:32"
+                    # convert "2026-05-13 09:18:32" → "2026 05 13 09 18 32"
+                    s = parts[1]; gsub(/[-:]/, " ", s)
+                    base = mktime(s)
+                    frac = (n_parts >= 2) ? ("0." parts[2]) + 0 : 0
+                    return base + frac
+                }
+                {
+                    # parse jsonl
+                    match($0, /"time":"[^"]+"/);    tstr=substr($0, RSTART+8, RLENGTH-9)
+                    match($0, /"bw":[0-9.eE+-]+/);  bw  =substr($0, RSTART+5, RLENGTH-5)+0
+                    match($0, /"idle":[0-9.eE+-]+/);idl =substr($0, RSTART+7, RLENGTH-7)+0
+                    match($0, /"stall":[0-9.eE+-]+/);stl=substr($0, RSTART+8, RLENGTH-8)+0
+                    match($0, /"rows":[0-9]+/);     rws =substr($0, RSTART+7, RLENGTH-7)+0
+
+                    e = to_epoch(tstr)
+                    gap = e - prev_e
+                    if (NR == 1 || gap > gap_thresh+0) {
+                        if (cid > 0) { r_end_e[cid] = prev_e; r_end_t[cid] = prev_t }
+                        cid++
+                        r_start_e[cid] = e; r_start_t[cid] = tstr
+                        r_n[cid] = 0; r_rows[cid] = 0
+                        r_sum_bw[cid] = 0; r_peak_bw[cid] = bw
+                        r_sum_id[cid] = 0; r_min_id[cid] = idl
+                        r_sum_st[cid] = 0
+                    }
+                    r_n[cid]++
+                    r_rows[cid] += rws
+                    r_sum_bw[cid] += bw
+                    r_sum_id[cid] += idl
+                    r_sum_st[cid] += stl
+                    if (bw  > r_peak_bw[cid]) r_peak_bw[cid] = bw
+                    if (idl < r_min_id[cid])  r_min_id[cid]  = idl
+                    prev_e = e; prev_t = tstr
+                }
+                END {
+                    if (cid == 0) { print "  (no clusters formed)"; exit }
+                    r_end_e[cid] = prev_e; r_end_t[cid] = prev_t
+                    start = (cid > n) ? cid - n + 1 : 1
+
+                    printf "  %-4s  %-19s  %8s  %5s  %6s  %8s  %8s  %8s  %8s\n", \
+                           "run", "start (local time)", "dur_ms", "ticks", "events", "avg_BW", "peak_BW", "avg_idl%", "min_idl%"
+                    printf "  %-4s  %-19s  %8s  %5s  %6s  %8s  %8s  %8s  %8s\n", \
+                           "---", "-------------------", "--------", "-----", "------", "--------", "--------", "--------", "--------"
+                    for (i = start; i <= cid; i++) {
+                        dur_ms = (r_end_e[i] - r_start_e[i]) * 1000
+                        avg_bw = r_sum_bw[i] / r_n[i]
+                        avg_id = r_sum_id[i] / r_n[i]
+                        cmd = "date -d \"" r_start_t[i] "\" +\"%Y-%m-%d %H:%M:%S\""
+                        cmd | getline tlocal; close(cmd)
+                        printf "  %-4d  %-19s  %8.1f  %5d  %6d  %8.1f  %8.1f  %8.1f  %8.1f\n", \
+                               i, tlocal, dur_ms, r_n[i], r_rows[i], avg_bw, r_peak_bw[i], avg_id, r_min_id[i]
+                    }
+                    printf "\n"
+                    printf "  Legend:\n"
+                    printf "    dur_ms    wall-clock span of the active window (ms)\n"
+                    printf "    ticks     distinct HBM timestamps in the burst\n"
+                    printf "    events    individual HBM access events (one row each)\n"
+                    printf "    avg/peak_BW   aggregate read bandwidth across all banks (GB/s)\n"
+                    printf "    avg/min_idl%% bus idle %% per tick (lower = more loaded)\n"
+
+                    if (cid >= 2) {
+                        printf "\n"
+                        printf "  INTER-RUN GAPS (idle time between runs — host overhead):\n"
+                        printf "  Includes: command exit, edit/build/load, next-loader startup,\n"
+                        printf "            opt-pass re-run, slot reassignment, page-cache warm-up.\n"
+                        printf "\n"
+                        printf "  %-18s  %10s\n", "between", "gap"
+                        printf "  %-18s  %10s\n", "------------------", "----------"
+                        for (i = start + 1; i <= cid; i++) {
+                            gs = r_start_e[i] - r_end_e[i-1]
+                            if      (gs < 60)   ghr = sprintf("%.1fs", gs)
+                            else if (gs < 3600) ghr = sprintf("%dm %ds", int(gs/60), int(gs)%60)
+                            else                ghr = sprintf("%dh %dm", int(gs/3600), int((gs%3600)/60))
+                            printf "  run %-3d → run %-3d  %10s\n", i-1, i, ghr
+                        }
+                    } else {
+                        printf "\n"
+                        printf "  (only 1 run in DB — re-run the kernel to see inter-run gaps)\n"
+                    }
+                }
+            '
+            ;;
         all)
-            for s in hbm-dist hbm-ts cache-rates mill bbg; do
+            for s in hbm-dist runs hbm-ts cache-rates mill bbg; do
                 printf "\n── %s ──\n" "$s"; profile_extra "$s"
             done ;;
         *|-h|--help)
             cat <<EOF
-profile_extra hbm-dist                 # HBM idle% distribution buckets (all samples)
+profile_extra hbm-dist                 # HBM idle% distribution buckets (all samples, aggregated)
+profile_extra runs [N] [--gap S]       # last N runs (clustered active windows) + inter-run gaps
+                                       #   --gap S: time gap (seconds) that separates runs (default 60)
 profile_extra hbm-ts [N]               # top N ACTIVE HBM samples (idle<50%, lowest-idle first) — default 40
 profile_extra hbm-ts --all [N]         # last N samples chronologically (mostly idle between calls)
 profile_extra cache-rates              # cache hit/miss with %
 profile_extra mill                     # per-mill list (NULL thread-cap shown as '-')
 profile_extra bbg [N]                  # per-BBG breakdown of each mill, sorted by hottest first (default top 1000)
-profile_extra all                      # run all the above (hbm-ts in active mode)
+profile_extra all                      # run all the above
 EOF
             ;;
     esac
@@ -744,13 +872,14 @@ function menu-profiler {
     echo "0. exit"
     echo "1. profile_analyze (current run state)"
     echo "2. profile_compare (latest 2 TSVs in PWD)"
-    echo "3. profile_extra hbm-dist"
-    echo "4. profile_extra cache-rates"
-    echo "5. profile_extra mill"
-    echo "6. profile_extra bbg  (per-BBG breakdown)"
-    echo "7. profile_extra all"
-    echo "8. profile_experiment (interactive prompts)"
-    echo "9. show profile out-dir + recent TSVs"
+    echo "3. profile_extra hbm-dist             (aggregate idle% bucket distribution)"
+    echo "4. profile_extra runs                 (per-run BW + inter-run gap overhead)"
+    echo "5. profile_extra cache-rates"
+    echo "6. profile_extra mill"
+    echo "7. profile_extra bbg                  (per-BBG breakdown)"
+    echo "8. profile_extra all"
+    echo "9. profile_experiment (interactive prompts)"
+    echo "10. show profile out-dir + recent TSVs"
     echo "===================menu-profiler================"
     read -p "Select an option: " option
     case "$option" in
@@ -760,16 +889,19 @@ function menu-profiler {
             menu-profiler ;;
         2)  profile_compare --latest 2; menu-profiler ;;
         3)  profile_extra hbm-dist; menu-profiler ;;
-        4)  profile_extra cache-rates; menu-profiler ;;
-        5)  profile_extra mill; menu-profiler ;;
-        6)  profile_extra bbg; menu-profiler ;;
-        7)  profile_extra all; menu-profiler ;;
-        8)  read -p "label: " l
+        4)  read -p "how many recent runs (default 10): " r
+            [[ -n "$r" ]] && profile_extra runs "$r" || profile_extra runs
+            menu-profiler ;;
+        5)  profile_extra cache-rates; menu-profiler ;;
+        6)  profile_extra mill; menu-profiler ;;
+        7)  profile_extra bbg; menu-profiler ;;
+        8)  profile_extra all; menu-profiler ;;
+        9)  read -p "label: " l
             read -p "warmup cmd (after 'nextloader ... --'): " w
             read -p "measure cmd: " m
             profile_experiment --label "$l" --warmup "$w" --measure "$m"
             menu-profiler ;;
-        9)  echo_info "Out dir: $_PROFILER_OUT_DIR_DEFAULT"
+        10) echo_info "Out dir: $_PROFILER_OUT_DIR_DEFAULT"
             ls -lat "$_PROFILER_OUT_DIR_DEFAULT"/profile_*.tsv 2>/dev/null | head -10
             menu-profiler ;;
         *)  echo "Invalid"; menu-profiler ;;
