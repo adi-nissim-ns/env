@@ -131,21 +131,40 @@ function _nextenv_prep_build() {
         local count
         count=$(find "$tmp_dir" -maxdepth 1 -name '.tmp*' -type d 2>/dev/null | wc -l)
         if [[ "$count" -gt 0 ]]; then
-            find "$tmp_dir" -maxdepth 1 -name '.tmp*' -type d -exec rm -rf {} + 2>/dev/null || true
+            run_command find "$tmp_dir" -maxdepth 1 -name '.tmp*' -type d -exec rm -rf {} +
             echo_info "Cleaned ${count} stale uv temp build dir(s)"
         fi
     fi
 
     # NFS lock files — held open by lingering processes after a failed build;
-    # fuser -k sends SIGTERM so setup.sh can rm -rf .buildtools_venv cleanly.
+    # try SIGTERM first, then SIGKILL if the file is still busy.
     if [[ -d "${nu}/.buildtools_venv" ]]; then
-        local nfs_count
-        nfs_count=$(find "${nu}/.buildtools_venv" -name '.nfs*' 2>/dev/null | wc -l)
-        if [[ "$nfs_count" -gt 0 ]]; then
-            echo_warning "Releasing ${nfs_count} NFS lock file(s) in .buildtools_venv..."
-            find "${nu}/.buildtools_venv" -name '.nfs*' -print0 2>/dev/null \
-                | xargs -0 -r fuser -k 2>/dev/null || true
-            sleep 1
+        local nfs_files
+        mapfile -t nfs_files < <(find "${nu}/.buildtools_venv" -name '.nfs*' 2>/dev/null)
+        if [[ ${#nfs_files[@]} -gt 0 ]]; then
+            echo_warning "${#nfs_files[@]} NFS lock file(s) found:"
+            printf '    %s\n' "${nfs_files[@]}"
+            local f
+            for f in "${nfs_files[@]}"; do
+                local holders
+                holders=$(fuser "$f" 2>/dev/null)
+                if [[ -n "$holders" ]]; then
+                    echo_info "Held by PID(s):${holders}"
+                    run_command fuser -TERM "$f"
+                    sleep 1
+                    if fuser "$f" &>/dev/null 2>&1; then
+                        run_command fuser -KILL "$f"
+                        sleep 1
+                    fi
+                else
+                    echo_warning "No process holds ${f} — may be a remote NFS lock (cannot release locally)"
+                fi
+                if fuser "$f" &>/dev/null 2>&1; then
+                    echo_error "Could not release ${f} — setup.sh rm -rf will likely fail"
+                else
+                    echo_success "Released ${f}"
+                fi
+            done
         fi
     fi
 }
@@ -167,8 +186,7 @@ function _nextenv_sync_home_links() {
 
         current_target=$(readlink "$home_link" 2>/dev/null)
         if [[ "$target" != "$current_target" ]]; then
-            ln -sfn "$target" "$home_link"
-            echo_info "Updated ~/${cache_dir} -> ${target}"
+            run_command ln -sfn "$target" "$home_link"
         fi
     done
 }
@@ -350,7 +368,7 @@ function _nextenv_add_worktree() {
     # "inside" its path, getcwd() fails and breaks git and Lmod.
     cd "$HOME" 2>/dev/null || true
 
-    mkdir -p "${sel_base}/sw/${_NEXTENV_WT_SUBDIR}"
+    run_command mkdir -p "${sel_base}/sw/${_NEXTENV_WT_SUBDIR}"
 
     if [[ $branch_on_remote -eq 1 ]]; then
         run_command git clone -b "$branch_name" "$_NEXTENV_REMOTE" "$wt_dir" \
@@ -401,8 +419,8 @@ function _nextenv_add_worktree() {
         _nextenv_prep_build "$wt_dir"
         (
             cd "$wt_dir" \
-            && ./setup.sh --fetch-all --create-buildtools-venv \
-            && ./build.sh --install --no-tests
+            && run_command ./setup.sh --fetch-all --create-buildtools-venv \
+            && run_command ./build.sh --install --no-tests
         )
         local _brc=$?
         export NEXT_HOME="$_old_nh"
