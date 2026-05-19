@@ -70,9 +70,12 @@ run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.nextenv
 # Apply saved nextenv state before creating dirs so NEXT_HOME is correct
 _nextenv_startup_apply
 
-# cdnext/cdutils depend on NEXT_HOME/NEXTUTILS which may be updated by _nextenv_startup_apply
-env_create_cd_alias cdnext "${NEXT_HOME}"
-env_create_cd_alias cdutils "${NEXTUTILS}"
+# cdnext/cdutils only make sense when a nextenv is active — skip if nothing is set
+# (_nextenv_patch_env already creates them on switch; default NEXT_HOME may not exist here)
+if [[ -n "${NEXTENV_TYPE:-}" ]]; then
+    env_create_cd_alias cdnext "${NEXT_HOME}"
+    env_create_cd_alias cdutils "${NEXTUTILS}"
+fi
 
 #------------------------------------------------------------------
 # Create directories if they don't exist
@@ -93,7 +96,7 @@ function create_dir_if_not_exists() {
   fi
 }
 
-create_dir_if_not_exists ${NEXT_HOME}
+[[ "${NEXTENV_TYPE:-}" == "worktree" ]] && create_dir_if_not_exists ${NEXT_HOME}
 create_dir_if_not_exists ${SW_HOME}
 create_dir_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.conan2
 create_dir_if_not_exists /${SHARED_SPACE_NAME}/users/${USER}/.ccache

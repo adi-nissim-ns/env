@@ -2,7 +2,7 @@
 
 _ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 
-_NEXTENV_STATE_FILE="${_ENV_PROJECT_DIR}/.nextenv_state"
+_NEXTENV_STATE_FILE="${_ENV_PROJECT_DIR}/.nextenv_state.$(hostname -s)"
 _NEXTENV_REPO_NAME="nextutils"
 _NEXTENV_WT_SUBDIR="nextutils_wt"
 _NEXTENV_REMOTE="git@github.com:nextsilicon/nextutils.git"
@@ -21,18 +21,20 @@ function _nextenv_known_bases() {
     for base in "/space2/users/${USER}" "/space3/users/${USER}" "/space4/users/${USER}"; do
         [[ -d "${base}/sw" ]] && echo "$base"
     done
+    # devpod fast local workspace (or SSHFS-mounted from devpod on other machines)
+    [[ -d "/workspace/${USER}" ]] && echo "/workspace/${USER}"
     # Always include $HOME — sw/ will be created on demand
     echo "${HOME}"
 }
 
-# Short label for display: /space3/users/adin → space3, /home/adin → home
+# Short label for display: /space3/users/adin → space3, /home/adin → home, /workspace/adin → workspace
 function _nextenv_space_name() {
     local base="$1"
-    if [[ "$base" == "$HOME" ]]; then
-        echo "home"
-    else
-        echo "$base" | sed 's|/\([^/]*\)/users/.*|\1|'
-    fi
+    case "$base" in
+        "$HOME")                echo "home" ;;
+        "/workspace/${USER}")   echo "workspace" ;;
+        *)  echo "$base" | sed 's|/\([^/]*\)/users/.*|\1|' ;;
+    esac
 }
 
 # Derive the conventional NEXT_HOME for a main clone given its space base.
@@ -250,13 +252,46 @@ function _nextenv_patch_env() {
     [[ -n "${NEXTUTILS:-}" ]] && alias cdutils="cd ${NEXTUTILS}"
 }
 
+# Auto-detect best available environment on this machine (called on fresh machines).
+# Activates sw-kit if installed; otherwise leaves env clean.
+function _nextenv_auto_detect() {
+    local kit_path kit_ver
+    while IFS='|' read -r kit_path kit_ver; do
+        _nextenv_switch "swkit" "$kit_ver" "$kit_path" ""
+        echo_info "nextenv: auto-detected sw-kit ${kit_ver}"
+        return 0
+    done < <(_nextenv_find_swkits)
+    # Nothing available — clean slate, user picks via menu
+}
+
+# Parse devpodctl info to get "ip|port" for the current user's devpod.
+function _nextenv_devpod_info() {
+    local devpodctl="/tools/qemu/scripts/devpodctl"
+    [[ ! -x "$devpodctl" ]] && return 1
+    local info; info=$("$devpodctl" info 2>/dev/null) || return 1
+    local ip port
+    ip=$(echo "$info"   | grep -oP 'Public IP:\s+\K[0-9.]+')
+    port=$(echo "$info" | grep -oP 'Public Port:\s+\K[0-9]+')
+    [[ -z "$ip" || -z "$port" ]] && return 1
+    echo "${ip}|${port}"
+}
+
 # Called at shell startup: read state file and patch env if it differs from defaults.
 function _nextenv_startup_apply() {
     # Always clear inherited NEXTENV_* vars first — state must come from the file only,
     # not from exported vars of a parent shell pointing at a now-deleted environment.
     unset NEXTENV_TYPE NEXTENV_LABEL NEXTENV_NEXT_HOME NEXTENV_NEXTUTILS
 
-    [[ ! -f "$_NEXTENV_STATE_FILE" ]] && return 0
+    # Per-hostname state file: migrate from the old shared file on first run.
+    if [[ ! -f "$_NEXTENV_STATE_FILE" ]]; then
+        local _old="${_ENV_PROJECT_DIR}/.nextenv_state"
+        if [[ -f "$_old" ]]; then
+            cp "$_old" "$_NEXTENV_STATE_FILE"
+        else
+            _nextenv_auto_detect   # fresh machine with no prior state
+            return 0
+        fi
+    fi
 
     # Source state vars into current shell (only NEXTENV_* keys)
     local line key val
@@ -271,6 +306,14 @@ function _nextenv_startup_apply() {
     local new_nu="${NEXTENV_NEXTUTILS:-}"
 
     [[ -z "$new_nh" && -z "$new_nu" ]] && return 0
+
+    # sw-kit was active on another machine but isn't installed here — clear and auto-detect
+    if [[ "${NEXTENV_TYPE:-}" == "swkit" && ! -d /opt/nextsilicon ]]; then
+        rm -f "$_NEXTENV_STATE_FILE"
+        unset NEXTENV_TYPE NEXTENV_LABEL NEXTENV_NEXT_HOME NEXTENV_NEXTUTILS
+        _nextenv_auto_detect
+        return 0
+    fi
 
     # Migrate swkit label from old "installed" fallback to detected version
     if [[ "${NEXTENV_TYPE:-}" == "swkit" && "${NEXTENV_LABEL:-}" == "installed" ]]; then
@@ -302,7 +345,11 @@ function _nextenv_startup_apply() {
     fi
 
     if [[ -n "$new_nh" && ! -d "$new_nh" ]]; then
-        echo_warning "nextenv: NEXT_HOME '${new_nh}' does not exist yet (build to create it)"
+        if [[ "${NEXTENV_TYPE:-}" == "swkit" ]]; then
+            echo_warning "nextenv: sw-kit not installed — use menu-nextenv option d to install"
+        else
+            echo_warning "nextenv: NEXT_HOME '${new_nh}' does not exist yet (build to create it)"
+        fi
     fi
 
     _nextenv_patch_env "$new_nh" "$new_nu"
@@ -320,6 +367,20 @@ function _nextenv_switch() {
     export NEXTENV_NEXTUTILS="$nextutils"
     _nextenv_patch_env "$next_home" "$nextutils"
     echo_success "Switched to [${type}] ${label}"
+    echo_info "  NEXT_HOME = ${NEXT_HOME}"
+    [[ -n "$nextutils" ]] && echo_info "  NEXTUTILS = ${NEXTUTILS}"
+}
+
+# Same as _nextenv_switch but does NOT write the state file.
+# Other terminals and new shells keep their own state unchanged.
+function _nextenv_switch_local() {
+    local type="$1" label="$2" next_home="$3" nextutils="${4:-}"
+    export NEXTENV_TYPE="$type"
+    export NEXTENV_LABEL="$label"
+    export NEXTENV_NEXT_HOME="$next_home"
+    export NEXTENV_NEXTUTILS="$nextutils"
+    _nextenv_patch_env "$next_home" "$nextutils"
+    echo_success "Switched locally to [${type}] ${label}  (this terminal only)"
     echo_info "  NEXT_HOME = ${NEXT_HOME}"
     [[ -n "$nextutils" ]] && echo_info "  NEXTUTILS = ${NEXTUTILS}"
 }
@@ -620,6 +681,9 @@ function menu-nextenv() {
     echo "  b. Remove a standalone clone"
     echo "  c. Build active worktree  (./build.sh --install --no-tests)"
     echo "  d. Run swkit-install.sh  (requires sudo)"
+    echo "  e. Mount devpod /workspace here via SSHFS  (run this on dev-sw05/servers, not on the devpod)"
+    echo "  f. Unmount devpod /workspace  (run on the same machine you mounted from)"
+    echo "  g. Switch env (this terminal only — does not affect other terminals)"
     echo ""
     echo "0. Back"
     echo "===================================================="
@@ -692,6 +756,44 @@ function menu-nextenv() {
                 echo_error "swkit-install.sh not found at ${installer}"
             fi
             menu-nextenv ;;
+        e|E)
+            local mp="/workspace/${USER}"
+            if mountpoint -q "$mp" 2>/dev/null; then
+                echo_warning "${mp} is already mounted"
+            else
+                local _dpinfo; _dpinfo=$(_nextenv_devpod_info) \
+                    || { echo_error "devpodctl not available or devpod not running"; menu-nextenv; return; }
+                local _dpip="${_dpinfo%%|*}" _dpport="${_dpinfo##*|}"
+                echo_info "Mounting devpod workspace: ${_dpip}:${_dpport} → ${mp}"
+                sudo mkdir -p "$mp"
+                sudo chown "$(id -u):$(id -g)" "$mp"
+                sshfs -p "$_dpport" "${USER}@${_dpip}:/workspace/${USER}" "$mp" \
+                    -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=10,auto_cache,cache_timeout=60
+                check_command "sshfs mount ${mp}"
+            fi
+            menu-nextenv ;;
+        f|F)
+            local mp="/workspace/${USER}"
+            if mountpoint -q "$mp" 2>/dev/null; then
+                fusermount -u -z "$mp"
+                check_command "unmount ${mp}"
+            else
+                echo_warning "${mp} is not mounted"
+            fi
+            menu-nextenv ;;
+        g|G)
+            echo ""
+            read -rp "  Switch locally to number (from list above, 0 to cancel): " _lc
+            [[ "$_lc" == "0" || -z "$_lc" ]] && { menu-nextenv; return; }
+            if [[ "$_lc" =~ ^[0-9]+$ ]] \
+                && [[ "$_lc" -ge 1 ]] \
+                && [[ "$_lc" -le ${#numbered[@]} ]]; then
+                IFS='|' read -r type sn label nh nu <<< "${numbered[$((${_lc}-1))]}"
+                _nextenv_switch_local "$type" "$label" "$nh" "$nu"
+            else
+                echo_error "Invalid selection"
+            fi
+            menu-nextenv ;;
         *)
             if [[ "$choice" =~ ^[0-9]+$ ]] \
                 && [[ "$choice" -ge 1 ]] \
@@ -720,11 +822,18 @@ function get_nextenv_name() {
 
 # ── Quick switcher ─────────────────────────────────────────────────────────────
 
-# nextenv-use [label]  — switch to a named environment without opening the menu.
+# nextenv-use [--local] [label]  — switch to a named environment without opening the menu.
+# --local: switch only in this terminal; does not write the state file.
 # With no argument: print the currently active environment.
 # Label matching: exact dir_name or branch name for worktrees; "swkit" for sw-kit.
 function nextenv-use() {
-    local target="${1:-}"
+    local _local_only=0 target=""
+    for _nu_arg in "$@"; do
+        case "$_nu_arg" in
+            --local) _local_only=1 ;;
+            *)       target="$_nu_arg" ;;
+        esac
+    done
 
     if [[ -z "$target" ]]; then
         echo_info "Active: [${NEXTENV_TYPE:-<none>}] ${NEXTENV_LABEL:-<none>}"
@@ -741,7 +850,9 @@ function nextenv-use() {
         dir_name=$(basename "$wt_dir")
         label="${sn}/${dir_name}"
         if [[ "$label" == "$target" || "$dir_name" == "$target" || "$branch" == "$target" ]]; then
-            _nextenv_switch "worktree" "$label" "$nh" "$wt_dir"
+            [[ $_local_only -eq 1 ]] \
+                && _nextenv_switch_local "worktree" "$label" "$nh" "$wt_dir" \
+                || _nextenv_switch       "worktree" "$label" "$nh" "$wt_dir"
             return 0
         fi
     done < <(_nextenv_find_worktrees)
@@ -752,7 +863,9 @@ function nextenv-use() {
         sn=$(_nextenv_space_name "$base")
         label="${sn}/${branch}"
         if [[ "$label" == "$target" || "$branch" == "$target" ]]; then
-            _nextenv_switch "worktree" "$label" "$nh" "$repo"
+            [[ $_local_only -eq 1 ]] \
+                && _nextenv_switch_local "worktree" "$label" "$nh" "$repo" \
+                || _nextenv_switch       "worktree" "$label" "$nh" "$repo"
             return 0
         fi
     done < <(_nextenv_find_main_repos)
@@ -761,7 +874,9 @@ function nextenv-use() {
     if [[ "$target" == swkit* ]]; then
         local kit_path kit_ver
         while IFS='|' read -r kit_path kit_ver; do
-            _nextenv_switch "swkit" "$kit_ver" "$kit_path" ""
+            [[ $_local_only -eq 1 ]] \
+                && _nextenv_switch_local "swkit" "$kit_ver" "$kit_path" "" \
+                || _nextenv_switch       "swkit" "$kit_ver" "$kit_path" ""
             return 0
         done < <(_nextenv_find_swkits)
         echo_error "No sw-kit installed"
