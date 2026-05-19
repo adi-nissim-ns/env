@@ -118,6 +118,38 @@ EOF
 # Point ~/.cache, ~/.ccache, ~/.conan2 at the active worktree's own directories.
 # Each worktree owns its cache dirs; ~ is just a convenience symlink to the active one.
 # Only touches entries that are already symlinks in HOME (safe on machines without them).
+# Prepare worktree for a build run:
+#   1. Remove stale uv .tmp* dirs that cause "Directory not empty" on retries.
+#   2. Release NFS lock files in .buildtools_venv so setup.sh can rm -rf it.
+function _nextenv_prep_build() {
+    local nu="${1:-}"
+    [[ -z "$nu" ]] && return 0
+
+    # uv temp dirs
+    local tmp_dir="${nu}/.uv_cache/builds-v0"
+    if [[ -d "$tmp_dir" ]]; then
+        local count
+        count=$(find "$tmp_dir" -maxdepth 1 -name '.tmp*' -type d 2>/dev/null | wc -l)
+        if [[ "$count" -gt 0 ]]; then
+            find "$tmp_dir" -maxdepth 1 -name '.tmp*' -type d -exec rm -rf {} + 2>/dev/null || true
+            echo_info "Cleaned ${count} stale uv temp build dir(s)"
+        fi
+    fi
+
+    # NFS lock files — held open by lingering processes after a failed build;
+    # fuser -k sends SIGTERM so setup.sh can rm -rf .buildtools_venv cleanly.
+    if [[ -d "${nu}/.buildtools_venv" ]]; then
+        local nfs_count
+        nfs_count=$(find "${nu}/.buildtools_venv" -name '.nfs*' 2>/dev/null | wc -l)
+        if [[ "$nfs_count" -gt 0 ]]; then
+            echo_warning "Releasing ${nfs_count} NFS lock file(s) in .buildtools_venv..."
+            find "${nu}/.buildtools_venv" -name '.nfs*' -print0 2>/dev/null \
+                | xargs -0 -r fuser -k 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+}
+
 function _nextenv_sync_home_links() {
     local nu="${1:-}"
     [[ -z "$nu" ]] && return 0
@@ -286,15 +318,20 @@ function _nextenv_add_worktree() {
         return 1
     fi
 
-    # Step 3 — check if branch exists on remote
+    # Step 3 — check if branch exists on remote (timeout avoids slow SSH handshake)
     local branch_on_remote=0
     echo_info "Checking remote for branch '${branch_name}'..."
-    if git ls-remote --heads "$_NEXTENV_REMOTE" "$branch_name" 2>/dev/null \
-            | grep -qF "refs/heads/${branch_name}"; then
-        branch_on_remote=1
-        echo_info "Branch '${branch_name}' found on remote."
+    local _ls_out
+    if _ls_out=$(timeout 8 git ls-remote --heads "$_NEXTENV_REMOTE" "$branch_name" 2>/dev/null); then
+        if echo "$_ls_out" | grep -qF "refs/heads/${branch_name}"; then
+            branch_on_remote=1
+            echo_info "Branch '${branch_name}' found on remote."
+        else
+            echo_warning "Branch '${branch_name}' not on remote — will clone default branch and create it locally."
+        fi
     else
-        echo_warning "Branch '${branch_name}' not on remote — will clone default branch and create it locally."
+        echo_warning "Remote check timed out — assuming branch '${branch_name}' exists on remote."
+        branch_on_remote=1
     fi
 
     echo ""
@@ -325,6 +362,9 @@ function _nextenv_add_worktree() {
             || { echo_error "Failed to create branch '${branch_name}'."; return 1; }
     fi
 
+    run_command git -C "$wt_dir" submodule update --init --recursive \
+        || { echo_error "Submodule init failed."; return 1; }
+
     # Add build artifacts to the clone's local git exclude (avoids modifying tracked .gitignore)
     local exclude_file="${wt_dir}/.git/info/exclude"
     mkdir -p "$(dirname "$exclude_file")"
@@ -349,9 +389,16 @@ function _nextenv_add_worktree() {
     echo ""
     read -rp "Setup + build this clone now? (y/n): " do_build
     if [[ "$do_build" == "y" || "$do_build" == "Y" ]]; then
-        local _old_nh="$NEXT_HOME" _old_nu="$NEXTUTILS"
+        local _old_nh="$NEXT_HOME"     _old_nu="$NEXTUTILS"
+        local _old_conan="${CONAN_HOME:-}"  _old_xdg="${XDG_CACHE_HOME:-}"
+        local _old_ccache="${CCACHE_DIR:-}" _old_uv="${UV_CACHE_DIR:-}"
         export NEXT_HOME="$wt_nh"
         export NEXTUTILS="$wt_dir"
+        export CONAN_HOME="${wt_dir}/.conan2"
+        export XDG_CACHE_HOME="${wt_dir}/.cache"
+        export CCACHE_DIR="${wt_dir}/.ccache"
+        export UV_CACHE_DIR="${wt_dir}/.uv_cache"
+        _nextenv_prep_build "$wt_dir"
         (
             cd "$wt_dir" \
             && ./setup.sh --fetch-all --create-buildtools-venv \
@@ -360,6 +407,10 @@ function _nextenv_add_worktree() {
         local _brc=$?
         export NEXT_HOME="$_old_nh"
         export NEXTUTILS="$_old_nu"
+        [[ -n "$_old_conan" ]]   && export CONAN_HOME="$_old_conan"     || unset CONAN_HOME
+        [[ -n "$_old_xdg" ]]     && export XDG_CACHE_HOME="$_old_xdg"   || unset XDG_CACHE_HOME
+        [[ -n "$_old_ccache" ]]  && export CCACHE_DIR="$_old_ccache"    || unset CCACHE_DIR
+        [[ -n "$_old_uv" ]]      && export UV_CACHE_DIR="$_old_uv"      || unset UV_CACHE_DIR
         [[ $_brc -ne 0 ]] && echo_error "Build failed (exit ${_brc}). Run option c after fixing to retry."
     else
         echo_info "Tip: new clones need setup before building."
@@ -551,9 +602,10 @@ function menu-nextenv() {
                 fi
             fi
             if [[ -n "$build_nu" && -f "${build_nu}/build.sh" ]]; then
-                if [[ ! -d "${build_nu}/.buildtools_venv" ]]; then
-                    echo_warning "buildtools venv missing — running setup first."
-                    (cd "$build_nu" && run_command ./setup.sh --fetch-all --create-buildtools-venv && run_command ./build.sh --install --no-tests)
+                _nextenv_prep_build "$build_nu"
+                if [[ ! -x "${build_nu}/.buildtools_venv/bin/conan" ]]; then
+                    echo_warning "buildtools venv incomplete — running setup first."
+                    (cd "$build_nu" && run_command ./setup.sh --create-buildtools-venv && run_command ./build.sh --install --no-tests)
                 else
                     (cd "$build_nu" && run_command ./build.sh --install --no-tests)
                 fi
