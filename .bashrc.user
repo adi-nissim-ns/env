@@ -151,8 +151,8 @@ if are_we_in_a_development_host; then
   #  Setup rust environment
   #------------------------------------------------------------------
   echo ""
-  # Check if rust is installed
-  if [ -d "${CARGO_HOME}" ]; then
+  # Check if rust is installed (fall back to ~/.cargo if CARGO_HOME not explicitly set)
+  if [ -d "${CARGO_HOME:-${HOME}/.cargo}" ]; then
     echo "Rust is already installed."
   else
     read -p "would you like to setup the rust environment? (y/n) " setup_rust_env
@@ -160,7 +160,6 @@ if are_we_in_a_development_host; then
       setup_rust_env
     else
       echo "Rust environment setup skipped."
-      return 1
     fi
   fi
 
@@ -174,12 +173,11 @@ if are_we_in_a_development_host; then
     echo "Python virtual environment already exists at ${_PY_VENV}"
   else
     read -p "would you like to setup the python environment? (y/n) " setup_python_env
-    if [ "$setup_rust_env" == "y" ]; then
+    if [ "$setup_python_env" == "y" ]; then
       echo "Python virtual environment does not exist. Creating..."
       setup_python_env
     else
       echo "Python environment setup skipped."
-      return 1
     fi
   fi
 fi  
