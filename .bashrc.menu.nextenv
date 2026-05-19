@@ -216,6 +216,12 @@ function _nextenv_patch_env() {
         local mpi="${OPENMPI_PATH:-$NEXT_HOME}"
         export PATH="${NEXT_HOME}/bin:${mpi}/bin:${PATH}"
         export OPAL_PREFIX="$mpi"
+        export MPI_HOME="$mpi"
+        export OMPI_CC="${NEXT_HOME}/bin/nextcc"
+        export OMPI_FC="${NEXT_HOME}/bin/nextfort"
+        export OMPI_CXX="${NEXT_HOME}/bin/nextcxx"
+        export NEXTCRT_SOURCE="${NEXT_HOME}/src"
+        export NEXT_LLVM_SOURCE="${NEXT_HOME}/llvm"
         export SYSROOT_PATH="${NEXT_HOME}/sysroot/usr"
         export OBJDUMP="${NEXT_HOME}/llvm/bin/objdump"
         export DIS="${NEXT_HOME}/llvm/bin/llvm-dis"
@@ -246,6 +252,25 @@ function _nextenv_patch_env() {
 
     # Sync ~ cache symlinks so tools that ignore env vars still use the right space
     [[ -n "$new_nu" ]] && _nextenv_sync_home_links "$new_nu"
+
+    # binfmt management: worktree builds require binfmt disabled; sw-kit requires it enabled
+    local _binfmt="/proc/sys/fs/binfmt_misc/nextloader"
+    case "${NEXTENV_TYPE:-}" in
+        worktree)
+            if [[ -f "$_binfmt" ]]; then
+                echo_warning "nextenv: disabling nextloader binfmt for source build"
+                echo -1 | sudo tee "$_binfmt" > /dev/null
+                check_command "disable binfmt nextloader"
+            fi
+            ;;
+        swkit)
+            if [[ ! -f "$_binfmt" ]] && [[ -d /opt/nextsilicon ]]; then
+                echo_info "nextenv: re-enabling nextloader binfmt for sw-kit"
+                sudo systemctl restart systemd-binfmt 2>/dev/null
+                check_command "restart systemd-binfmt"
+            fi
+            ;;
+    esac
 
     # Keep cd aliases in sync with the live NEXT_HOME / NEXTUTILS values
     alias cdnext="cd ${NEXT_HOME}"
