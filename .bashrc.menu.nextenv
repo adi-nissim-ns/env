@@ -657,7 +657,7 @@ function menu-nextenv() {
                     [[ "$_ca" == "y" || "$_ca" == "Y" ]] && _clear_flag="--clear"
                 fi
                 echo_warning "sw-kit installation requires sudo — you will be prompted."
-                bash "$installer" --no-bashrc "$_clear_flag"
+                bash "$installer" --no-bashrc --no-libs "$_clear_flag"
                 local kver
                 kver=$(_nextenv_find_swkits | head -1 | cut -d'|' -f2)
                 if [[ -n "$kver" ]]; then

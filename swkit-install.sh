@@ -237,6 +237,17 @@ _install() {
 
     # Ask all options up front before any downloading
 
+    if [[ "${_OPT_NO_LIBS:-0}" -eq 0 ]]; then
+        local libs_ans
+        echo ""
+        echo "  This kit includes NextSilicon libraries bundled with the install."
+        read -rp "${GREEN}  Install NextSilicon libraries? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" libs_ans
+        if [[ "$libs_ans" =~ ^[Nn]$ ]]; then
+            echo "  ${YELLOW}Note: this installer version bundles libraries — they cannot be skipped.${NC}"
+            echo "  Continuing with full install..."
+        fi
+    fi
+
     local clear_opt=1
     if [[ "${_OPT_CLEAR:-1}" -eq 0 ]]; then
         clear_opt=0
@@ -532,10 +543,12 @@ _flow_clear() {
 main() {
     # Parse flags (used by menu-nextenv to skip interactive questions)
     _OPT_NO_BASHRC=0
-    _OPT_CLEAR=-1   # -1 = ask, 0 = no-clear, 1 = clear
+    _OPT_NO_LIBS=0   # 0 = ask, 1 = skip question (include libs, can't skip anyway)
+    _OPT_CLEAR=-1    # -1 = ask, 0 = no-clear, 1 = clear
     for _arg in "$@"; do
         case "$_arg" in
             --no-bashrc) _OPT_NO_BASHRC=1 ;;
+            --no-libs)   _OPT_NO_LIBS=1 ;;
             --no-clear)  _OPT_CLEAR=0 ;;
             --clear)     _OPT_CLEAR=1 ;;
         esac
