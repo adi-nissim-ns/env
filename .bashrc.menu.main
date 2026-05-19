@@ -16,6 +16,7 @@ function menu() {
   echo "8. Activate Python virtual environment"
   echo "9. enter menu-claude"
   echo "10. enter menu-profiler"
+  echo "11. enter menu-nextenv"
   echo "=====================menu===================="
   
   read -p "Select an option: " option
@@ -67,6 +68,10 @@ function menu() {
       echo "  _FISH_VENV      directory: ${_FISH_VENV}"
       echo "  _PRIVATE_VENV   directory: ${_PRIVATE_VENV}"
       echo "  _NEXTSW_VENV    directory: ${_NEXTSW_VENV}"
+      echo ""
+      echo "  nextenv active environment:"
+      echo "  NEXTENV_TYPE    : ${NEXTENV_TYPE:-<default>}"
+      echo "  NEXTENV_LABEL   : ${NEXTENV_LABEL:-<default>}"
       ;;
     8)
       activate_python_env
@@ -76,6 +81,9 @@ function menu() {
       ;;
     10)
       menu-profiler
+      ;;
+    11)
+      menu-nextenv
       ;;
     *)
       echo "Invalid option. Please try again."
