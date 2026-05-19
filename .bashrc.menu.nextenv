@@ -94,10 +94,17 @@ function _nextenv_find_worktrees() {
 # Emit "path|version" if a sw-kit is installed at /opt/nextsilicon.
 function _nextenv_find_swkits() {
     if [[ -d /opt/nextsilicon ]] && [[ -x /opt/nextsilicon/bin/nextsystemd ]]; then
-        local ver
+        local ver=""
+        # Try explicit sw-kit package name first (older format)
         ver=$(rpm -qa 2>/dev/null \
             | grep -iE '^(next-sw-kit|ns-sw-kit)' | head -1 \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+') || ver="installed"
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+')
+        # Fall back to nextruntime or nextdriver package version
+        if [[ -z "$ver" ]]; then
+            ver=$(rpm -qa --qf "%{VERSION}-%{RELEASE}\n" 2>/dev/null \
+                | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+')
+        fi
+        [[ -z "$ver" ]] && ver="unknown"
         echo "/opt/nextsilicon|${ver}"
     fi
 }
@@ -264,6 +271,22 @@ function _nextenv_startup_apply() {
     local new_nu="${NEXTENV_NEXTUTILS:-}"
 
     [[ -z "$new_nh" && -z "$new_nu" ]] && return 0
+
+    # Migrate swkit label from old "installed" fallback to detected version
+    if [[ "${NEXTENV_TYPE:-}" == "swkit" && "${NEXTENV_LABEL:-}" == "installed" ]]; then
+        local _kit_ver=""
+        _kit_ver=$(rpm -qa 2>/dev/null \
+            | grep -iE '^(next-sw-kit|ns-sw-kit)' | head -1 \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+')
+        if [[ -z "$_kit_ver" ]]; then
+            _kit_ver=$(rpm -qa --qf "%{VERSION}-%{RELEASE}\n" 2>/dev/null \
+                | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+')
+        fi
+        if [[ -n "$_kit_ver" ]]; then
+            export NEXTENV_LABEL="$_kit_ver"
+            _nextenv_write_state "${NEXTENV_TYPE}" "${NEXTENV_LABEL}" "$new_nh" "$new_nu"
+        fi
+    fi
 
     # Migrate old-format labels that lack a space prefix (e.g. "master" → "space4/master")
     if [[ -n "${NEXTENV_LABEL:-}" && "${NEXTENV_LABEL}" != */* && -n "$new_nu" ]]; then
@@ -584,7 +607,7 @@ function menu-nextenv() {
 
         marker=""
         [[ "$act_type" == "swkit" && "$label" == "$act_label" ]] && marker="  ${GREEN}*ACTIVE*${NC}"
-        printf "  ${CYAN}%2s.${NC} %s%b\n" "$i" "$label" "$marker"
+        printf "  ${CYAN}%2s.${NC} sw-kit %-20s  %s%b\n" "$i" "$label" "$nh" "$marker"
         numbered+=("$e")
         ((i++))
         has_kit=1
