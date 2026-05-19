@@ -419,6 +419,7 @@ function _nextenv_add_worktree() {
         _nextenv_prep_build "$wt_dir"
         (
             cd "$wt_dir" \
+            && run_command ./setup.sh --default --force \
             && run_command ./setup.sh --fetch-all --create-buildtools-venv \
             && run_command ./build.sh --install --no-tests
         )
@@ -623,7 +624,7 @@ function menu-nextenv() {
                 _nextenv_prep_build "$build_nu"
                 if [[ ! -x "${build_nu}/.buildtools_venv/bin/conan" ]]; then
                     echo_warning "buildtools venv incomplete — running setup first."
-                    (cd "$build_nu" && run_command ./setup.sh --create-buildtools-venv && run_command ./build.sh --install --no-tests)
+                    (cd "$build_nu" && run_command ./setup.sh --default --force && run_command ./setup.sh --create-buildtools-venv && run_command ./build.sh --install --no-tests)
                 else
                     (cd "$build_nu" && run_command ./build.sh --install --no-tests)
                 fi

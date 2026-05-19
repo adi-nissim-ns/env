@@ -51,8 +51,6 @@ env_create_alias .... "cd ../../.."
 env_create_alias lookfor "grep -rnw . -e " 
 env_create_cd_alias cdenv "$_ENV_PROJECT_DIR"
 env_create_cd_alias cdsw "${SW_HOME}"
-env_create_cd_alias cdnext "${NEXT_HOME}"
-env_create_cd_alias cdutils "${NEXTUTILS}"
 env_create_cd_alias cdkokkos "${SW_HOME}/kokkos"
 env_create_cd_alias cdnextblas "${SW_HOME}/nextblas"
 env_create_alias nextloader-run "run_nextloader"
@@ -71,6 +69,10 @@ run_command_silent source ${_ENV_PROJECT_DIR}/.bashrc.menu.nextenv
 
 # Apply saved nextenv state before creating dirs so NEXT_HOME is correct
 _nextenv_startup_apply
+
+# cdnext/cdutils depend on NEXT_HOME/NEXTUTILS which may be updated by _nextenv_startup_apply
+env_create_cd_alias cdnext "${NEXT_HOME}"
+env_create_cd_alias cdutils "${NEXTUTILS}"
 
 #------------------------------------------------------------------
 # Create directories if they don't exist
