@@ -647,8 +647,17 @@ function menu-nextenv() {
         d|D)
             local installer="${_ENV_PROJECT_DIR}/swkit-install.sh"
             if [[ -f "$installer" ]]; then
+                # Libraries and bashrc are always skipped when called from the menu
+                # (worktrees supply their own libs; nextenv manages NEXT_HOME).
+                # Only ask about clearing — relevant when reinstalling or downgrading.
+                local _clear_flag="--no-clear"
+                if [[ -d /opt/nextsilicon ]]; then
+                    echo_warning "An existing sw-kit is installed at /opt/nextsilicon."
+                    read -rp "Clear it before installing? Recommended when reinstalling or downgrading (y/n): " _ca
+                    [[ "$_ca" == "y" || "$_ca" == "Y" ]] && _clear_flag="--clear"
+                fi
                 echo_warning "sw-kit installation requires sudo — you will be prompted."
-                bash "$installer"
+                bash "$installer" --no-bashrc "$_clear_flag"
                 local kver
                 kver=$(_nextenv_find_swkits | head -1 | cut -d'|' -f2)
                 if [[ -n "$kver" ]]; then

@@ -236,32 +236,38 @@ _install() {
     echo ""
 
     # Ask all options up front before any downloading
-    local lib_ans lib_arg="--no-nextsilicon-libs"
-    echo "  swkit includes two compute libraries: nextfft and nextblas (C++ with C"
-    echo "  and Fortran interfaces). If you are developing a custom build of either"
-    echo "  library, skip this — swkit's copies may conflict with your local build."
-    echo "  For all other users, installing the libraries is recommended."
-    read -rp "${GREEN}  Install NextSilicon libraries? [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" lib_ans
-    [[ "$lib_ans" =~ ^[Yy]$ ]] && lib_arg=""
 
-    local clear_ans clear_opt=1
-    echo ""
-    echo "  Clearing removes existing swkit packages, DKMS modules, and /opt/nextsilicon"
-    echo "  before the fresh install. Recommended when downgrading swkit (old files may"
-    echo "  otherwise linger) or when switching from a with-libraries to a"
-    echo "  without-libraries install. Safe to skip only on a first-time install."
-    read -rp "${GREEN}  Clear /opt/nextsilicon before install? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" clear_ans
-    [[ "$clear_ans" =~ ^[Nn]$ ]] && clear_opt=0
+    local clear_opt=1
+    if [[ "${_OPT_CLEAR:-1}" -eq 0 ]]; then
+        clear_opt=0
+        echo "  Clear     : skipped (--no-clear)"
+    elif [[ "${_OPT_CLEAR:-1}" -eq 1 ]]; then
+        echo "  Clear     : yes (--clear)"
+    else
+        local clear_ans
+        echo ""
+        echo "  Clearing removes existing swkit packages, DKMS modules, and /opt/nextsilicon"
+        echo "  before the fresh install. Recommended when downgrading swkit (old files may"
+        echo "  otherwise linger) or when switching from a with-libraries to a"
+        echo "  without-libraries install. Safe to skip only on a first-time install."
+        read -rp "${GREEN}  Clear /opt/nextsilicon before install? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" clear_ans
+        [[ "$clear_ans" =~ ^[Nn]$ ]] && clear_opt=0
+    fi
 
-    local bashrc_ans update_bashrc=0
-    echo ""
-    echo "  swkit always installs into /opt/nextsilicon. If you maintain a custom-built"
-    echo "  nextutils stack, your NEXT_HOME may currently point to that location instead."
-    echo "  Choosing Y updates your ~/.bashrc.USER to source swkit's environment and"
-    echo "  exports NEXT_HOME immediately so the change takes effect in the current shell."
-    echo "  Choose N to keep using your custom build."
-    read -rp "${GREEN}  Update ${BASHRC} to activate swkit? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" bashrc_ans
-    [[ "$bashrc_ans" =~ ^[Nn]$ ]] || update_bashrc=1
+    local update_bashrc=0
+    if [[ "${_OPT_NO_BASHRC:-0}" -eq 1 ]]; then
+        echo "  Bashrc    : skipped (--no-bashrc, managed by nextenv)"
+    else
+        local bashrc_ans
+        echo ""
+        echo "  swkit always installs into /opt/nextsilicon. If you maintain a custom-built"
+        echo "  nextutils stack, your NEXT_HOME may currently point to that location instead."
+        echo "  Choosing Y updates your ~/.bashrc.USER to source swkit's environment and"
+        echo "  exports NEXT_HOME immediately so the change takes effect in the current shell."
+        echo "  Choose N to keep using your custom build."
+        read -rp "${GREEN}  Update ${BASHRC} to activate swkit? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" bashrc_ans
+        [[ "$bashrc_ans" =~ ^[Nn]$ ]] || update_bashrc=1
+    fi
     echo ""
 
     local dl_url="${ARTIFACTORY_HOST}/artifactory/${REPO}/${BASE_PATH}/${channel}/${OS_KEY}/${version}/${filename}"
@@ -280,11 +286,23 @@ _install() {
     fi
 
     echo "  Running installer (sudo required)..."
-    if [[ -n "$lib_arg" ]]; then
-        sudo "${tmpdir}/${filename}" "$lib_arg" || { echo "  Installer failed."; return 1; }
-    else
-        sudo "${tmpdir}/${filename}" || { echo "  Installer failed."; return 1; }
-    fi
+    # On some VMs/containers even sudo cannot chown to uid 0, causing tar to fail
+    # when extracting the self-extracting archive. Inject a tar wrapper that adds
+    # --no-same-owner. secure_path+env_reset strip sudo env vars, so we set PATH
+    # inside a sudo bash -s script (runs after sudo's env reset).
+    local _tar_wrap; _tar_wrap=$(mktemp -d)
+    cat > "${_tar_wrap}/tar" <<'TARWRAP'
+#!/bin/bash
+exec /usr/bin/tar --no-same-owner "$@"
+TARWRAP
+    chmod +x "${_tar_wrap}/tar"
+    sudo bash -s "$_tar_wrap" "${tmpdir}/${filename}" <<'SUDO'
+export PATH="$1:$PATH"
+exec "$2"
+SUDO
+    local _rc=$?
+    rm -rf "$_tar_wrap"
+    [[ $_rc -ne 0 ]] && { echo "  Installer failed."; return 1; }
 
     [[ -f /etc/profile.d/nextsilicon.sh ]] && source /etc/profile.d/nextsilicon.sh
 
@@ -512,6 +530,17 @@ _flow_clear() {
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 main() {
+    # Parse flags (used by menu-nextenv to skip interactive questions)
+    _OPT_NO_BASHRC=0
+    _OPT_CLEAR=-1   # -1 = ask, 0 = no-clear, 1 = clear
+    for _arg in "$@"; do
+        case "$_arg" in
+            --no-bashrc) _OPT_NO_BASHRC=1 ;;
+            --no-clear)  _OPT_CLEAR=0 ;;
+            --clear)     _OPT_CLEAR=1 ;;
+        esac
+    done
+
     echo "==========================================="
     echo "  NextSilicon swkit Installer"
     echo "  OS detected: ${OS_KEY}"
