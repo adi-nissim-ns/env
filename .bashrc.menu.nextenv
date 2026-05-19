@@ -1,0 +1,596 @@
+#!/bin/bash
+
+_ENV_PROJECT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+
+_NEXTENV_STATE_FILE="${_ENV_PROJECT_DIR}/.nextenv_state"
+_NEXTENV_REPO_NAME="nextutils"
+_NEXTENV_WT_SUBDIR="nextutils_wt"
+_NEXTENV_REMOTE="git@github.com:nextsilicon/nextutils.git"
+
+# Capture defaults at source time so we can restore them when switching back to main clone
+_NEXTENV_DEFAULT_CONAN_HOME="${CONAN_HOME:-}"
+_NEXTENV_DEFAULT_UV_CACHE_DIR="${UV_CACHE_DIR:-}"
+_NEXTENV_DEFAULT_XDG_CACHE_HOME="${XDG_CACHE_HOME:-}"
+_NEXTENV_DEFAULT_CCACHE_DIR="${CCACHE_DIR:-}"
+
+# ── Space discovery ────────────────────────────────────────────────────────────
+
+# Emit each base path (/<space>/users/$USER or $HOME) that has a sw/ directory.
+function _nextenv_known_bases() {
+    local base
+    for base in "/space2/users/${USER}" "/space3/users/${USER}" "/space4/users/${USER}"; do
+        [[ -d "${base}/sw" ]] && echo "$base"
+    done
+    # Always include $HOME — sw/ will be created on demand
+    echo "${HOME}"
+}
+
+# Short label for display: /space3/users/adin → space3, /home/adin → home
+function _nextenv_space_name() {
+    local base="$1"
+    if [[ "$base" == "$HOME" ]]; then
+        echo "home"
+    else
+        echo "$base" | sed 's|/\([^/]*\)/users/.*|\1|'
+    fi
+}
+
+# Derive the conventional NEXT_HOME for a main clone given its space base.
+# Uses paths.conf when the space matches, otherwise falls back to the standard path.
+function _nextenv_main_nh() {
+    local space_base="$1"
+    local conf="${_ENV_PROJECT_DIR}/paths.conf"
+    if [[ -f "$conf" ]]; then
+        local raw
+        raw=$(grep '^export NEXT_HOME=' "$conf" | head -1 | sed 's/^export NEXT_HOME=//')
+        # Expand ${USER} / $USER literals
+        raw="${raw//\$\{USER\}/${USER}}"
+        raw="${raw//\$USER/${USER}}"
+        # Only use if it lives under the requested space
+        if [[ -n "$raw" && "$raw" == "${space_base}/"* ]]; then
+            echo "$raw"
+            return
+        fi
+    fi
+    local os="${_OS:-rocky}"
+    echo "${space_base}/env_${os}/next_home"
+}
+
+# ── Environment discovery ──────────────────────────────────────────────────────
+
+# Emit "base|branch|repo_path|next_home" for each main clone found.
+function _nextenv_find_main_repos() {
+    local base
+    while IFS= read -r base; do
+        local repo="${base}/sw/${_NEXTENV_REPO_NAME}"
+        if git -C "$repo" rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+            local branch
+            branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch="unknown"
+            echo "${base}|${branch}|${repo}|$(_nextenv_main_nh "$base")"
+        fi
+    done < <(_nextenv_known_bases)
+}
+
+# Emit "base|branch|wt_dir|next_home" for each standalone clone under sw/nextutils_wt/.
+# A standalone clone has .git as a directory (not a file, which is a linked worktree).
+function _nextenv_find_worktrees() {
+    local base
+    while IFS= read -r base; do
+        local wt_root="${base}/sw/${_NEXTENV_WT_SUBDIR}"
+        [[ -d "$wt_root" ]] || continue
+        local wt_dir
+        for wt_dir in "${wt_root}"/*/; do
+            [[ -d "$wt_dir" ]] || continue
+            local wt_dir="${wt_dir%/}"
+            if [[ -d "${wt_dir}/.git" ]]; then
+                local branch
+                branch=$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch="$(basename "$wt_dir")"
+                echo "${base}|${branch}|${wt_dir}|${wt_dir}/next_home"
+            fi
+        done
+    done < <(_nextenv_known_bases)
+}
+
+# Emit "path|version" if a sw-kit is installed at /opt/nextsilicon.
+function _nextenv_find_swkits() {
+    if [[ -d /opt/nextsilicon ]] && [[ -x /opt/nextsilicon/bin/nextsystemd ]]; then
+        local ver
+        ver=$(rpm -qa 2>/dev/null \
+            | grep -iE '^(next-sw-kit|ns-sw-kit)' | head -1 \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+') || ver="installed"
+        echo "/opt/nextsilicon|${ver}"
+    fi
+}
+
+# ── State management ───────────────────────────────────────────────────────────
+
+function _nextenv_write_state() {
+    local type="$1" label="$2" next_home="$3" nextutils="${4:-}"
+    cat > "$_NEXTENV_STATE_FILE" <<EOF
+# nextenv active environment — managed by menu-nextenv — do not edit manually
+NEXTENV_TYPE=${type}
+NEXTENV_LABEL=${label}
+NEXTENV_NEXT_HOME=${next_home}
+NEXTENV_NEXTUTILS=${nextutils}
+EOF
+}
+
+# Point ~/.cache, ~/.ccache, ~/.conan2 at the active worktree's own directories.
+# Each worktree owns its cache dirs; ~ is just a convenience symlink to the active one.
+# Only touches entries that are already symlinks in HOME (safe on machines without them).
+function _nextenv_sync_home_links() {
+    local nu="${1:-}"
+    [[ -z "$nu" ]] && return 0
+
+    local cache_dir home_link target current_target
+    for cache_dir in .cache .ccache .conan2; do
+        home_link="${HOME}/${cache_dir}"
+        [[ -L "$home_link" ]] || continue  # only manage existing symlinks
+
+        target="${nu}/${cache_dir}"
+        [[ "$target" == "$home_link" ]] && continue  # never self-point
+
+        # Only update if the target dir actually exists
+        [[ -d "$target" ]] || continue
+
+        current_target=$(readlink "$home_link" 2>/dev/null)
+        if [[ "$target" != "$current_target" ]]; then
+            ln -sfn "$target" "$home_link"
+            echo_info "Updated ~/${cache_dir} -> ${target}"
+        fi
+    done
+}
+
+# Apply new NEXT_HOME and NEXTUTILS values to the current shell, patching PATH
+# and all derived variables without duplicating entries.
+function _nextenv_patch_env() {
+    local new_nh="${1:-}" new_nu="${2:-}"
+
+    if [[ -n "$new_nh" && "$new_nh" != "${NEXT_HOME:-}" ]]; then
+        local old_nh="${NEXT_HOME:-}"
+        if [[ -n "$old_nh" ]]; then
+            local _esc
+            _esc=$(printf '%s' "$old_nh" | sed 's/[]\.[*^$()+?{|]/\\&/g')
+            PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "^${_esc}" | tr '\n' ':' | sed 's/:$//')
+        fi
+        export NEXT_HOME="$new_nh"
+        local mpi="${OPENMPI_PATH:-$NEXT_HOME}"
+        export PATH="${NEXT_HOME}/bin:${mpi}/bin:${PATH}"
+        export OPAL_PREFIX="$mpi"
+        export SYSROOT_PATH="${NEXT_HOME}/sysroot/usr"
+        export OBJDUMP="${NEXT_HOME}/llvm/bin/objdump"
+        export DIS="${NEXT_HOME}/llvm/bin/llvm-dis"
+    fi
+
+    if [[ -n "$new_nu" && "$new_nu" != "${NEXTUTILS:-}" ]]; then
+        export NEXTUTILS="$new_nu"
+        export NINJA="${NEXTUTILS}/.buildtools_venv/bin/ninja"
+    fi
+
+    # Per-worktree isolation: worktree branches get their own cache dirs so all
+    # build artifacts stay on the same filesystem as the worktree.
+    # Main clones (sw/nextutils, not sw/nextutils_wt/...) restore the defaults.
+    if [[ -n "${NEXTUTILS:-}" ]]; then
+        if [[ "$NEXTUTILS" == *"/${_NEXTENV_WT_SUBDIR}/"* ]]; then
+            export CONAN_HOME="${NEXTUTILS}/.conan2"
+            export UV_CACHE_DIR="${NEXTUTILS}/.uv_cache"
+            export XDG_CACHE_HOME="${NEXTUTILS}/.cache"
+            export CCACHE_DIR="${NEXTUTILS}/.ccache"
+        else
+            [[ -n "${_NEXTENV_DEFAULT_CONAN_HOME:-}" ]]     && export CONAN_HOME="$_NEXTENV_DEFAULT_CONAN_HOME"
+            [[ -n "${_NEXTENV_DEFAULT_UV_CACHE_DIR:-}" ]]   && export UV_CACHE_DIR="$_NEXTENV_DEFAULT_UV_CACHE_DIR" \
+                || unset UV_CACHE_DIR
+            [[ -n "${_NEXTENV_DEFAULT_XDG_CACHE_HOME:-}" ]] && export XDG_CACHE_HOME="$_NEXTENV_DEFAULT_XDG_CACHE_HOME"
+            [[ -n "${_NEXTENV_DEFAULT_CCACHE_DIR:-}" ]]     && export CCACHE_DIR="$_NEXTENV_DEFAULT_CCACHE_DIR"
+        fi
+    fi
+
+    # Sync ~ cache symlinks so tools that ignore env vars still use the right space
+    [[ -n "$new_nu" ]] && _nextenv_sync_home_links "$new_nu"
+
+    # Keep cd aliases in sync with the live NEXT_HOME / NEXTUTILS values
+    alias cdnext="cd ${NEXT_HOME}"
+    [[ -n "${NEXTUTILS:-}" ]] && alias cdutils="cd ${NEXTUTILS}"
+}
+
+# Called at shell startup: read state file and patch env if it differs from defaults.
+function _nextenv_startup_apply() {
+    # Always clear inherited NEXTENV_* vars first — state must come from the file only,
+    # not from exported vars of a parent shell pointing at a now-deleted environment.
+    unset NEXTENV_TYPE NEXTENV_LABEL NEXTENV_NEXT_HOME NEXTENV_NEXTUTILS
+
+    [[ ! -f "$_NEXTENV_STATE_FILE" ]] && return 0
+
+    # Source state vars into current shell (only NEXTENV_* keys)
+    local line key val
+    while IFS= read -r line; do
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        [[ "$key" =~ ^NEXTENV_ ]] && export "${key}=${val}"
+    done < "$_NEXTENV_STATE_FILE"
+
+    local new_nh="${NEXTENV_NEXT_HOME:-}"
+    local new_nu="${NEXTENV_NEXTUTILS:-}"
+
+    [[ -z "$new_nh" && -z "$new_nu" ]] && return 0
+
+    if [[ -n "$new_nh" && ! -d "$new_nh" ]]; then
+        echo_warning "nextenv: NEXT_HOME '${new_nh}' does not exist yet (build to create it)"
+    fi
+
+    _nextenv_patch_env "$new_nh" "$new_nu"
+
+    echo_info "nextenv: active → [${NEXTENV_TYPE:-worktree}] ${NEXTENV_LABEL:-?}"
+}
+
+# Write state file, export NEXTENV_* vars, and patch the live shell environment.
+function _nextenv_switch() {
+    local type="$1" label="$2" next_home="$3" nextutils="${4:-}"
+    _nextenv_write_state "$type" "$label" "$next_home" "$nextutils"
+    export NEXTENV_TYPE="$type"
+    export NEXTENV_LABEL="$label"
+    export NEXTENV_NEXT_HOME="$next_home"
+    export NEXTENV_NEXTUTILS="$nextutils"
+    _nextenv_patch_env "$next_home" "$nextutils"
+    echo_success "Switched to [${type}] ${label}"
+    echo_info "  NEXT_HOME = ${NEXT_HOME}"
+    [[ -n "$nextutils" ]] && echo_info "  NEXTUTILS = ${NEXTUTILS}"
+}
+
+# ── Clone management ──────────────────────────────────────────────────────────
+
+function _nextenv_add_worktree() {
+    echo ""
+    echo_info "Add new ${_NEXTENV_REPO_NAME} standalone clone"
+    echo ""
+
+    # Step 1 — pick space
+    local -a bases=()
+    local base i=1
+    echo "Available spaces:"
+    while IFS= read -r base; do
+        printf "  ${CYAN}%s.${NC} %s\n" "$i" "$base"
+        bases+=("$base")
+        ((i++))
+    done < <(_nextenv_known_bases)
+
+    if [[ ${#bases[@]} -eq 0 ]]; then
+        echo_error "No spaces found."
+        return 1
+    fi
+
+    echo ""
+    read -rp "Select space (0 to cancel): " space_sel
+    [[ "$space_sel" == "0" || -z "$space_sel" ]] && return 0
+    if ! [[ "$space_sel" =~ ^[0-9]+$ ]] || [[ "$space_sel" -lt 1 || "$space_sel" -gt ${#bases[@]} ]]; then
+        echo_error "Invalid selection"
+        return 1
+    fi
+    local sel_base="${bases[$((space_sel-1))]}"
+
+    # Step 2 — branch name
+    echo ""
+    read -rp "Branch name (existing remote branch, or new branch name): " branch_name
+    [[ -z "$branch_name" ]] && { echo_error "Branch name required"; return 1; }
+
+    # Sanitize for filesystem
+    local dir_name
+    dir_name=$(printf '%s' "$branch_name" | tr '/' '_' | tr ' ' '_' | tr -cd 'a-zA-Z0-9._-')
+
+    local wt_dir="${sel_base}/sw/${_NEXTENV_WT_SUBDIR}/${dir_name}"
+    local wt_nh="${wt_dir}/next_home"
+
+    if [[ -d "$wt_dir" ]]; then
+        echo_error "Directory ${wt_dir} already exists."
+        return 1
+    fi
+
+    # Step 3 — check if branch exists on remote
+    local branch_on_remote=0
+    echo_info "Checking remote for branch '${branch_name}'..."
+    if git ls-remote --heads "$_NEXTENV_REMOTE" "$branch_name" 2>/dev/null \
+            | grep -qF "refs/heads/${branch_name}"; then
+        branch_on_remote=1
+        echo_info "Branch '${branch_name}' found on remote."
+    else
+        echo_warning "Branch '${branch_name}' not on remote — will clone default branch and create it locally."
+    fi
+
+    echo ""
+    echo_info "Will create:"
+    echo_info "  Clone    : ${wt_dir}/"
+    echo_info "  NEXT_HOME: ${wt_nh}/"
+    echo_info "  Remote   : ${_NEXTENV_REMOTE}"
+    [[ $branch_on_remote -eq 1 ]] \
+        && echo_info "  Branch   : ${branch_name} (from remote)" \
+        || echo_info "  Branch   : ${branch_name} (new local branch)"
+    echo ""
+    read -rp "Proceed? (y/n): " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo_info "Cancelled."; return 0; }
+
+    # Ensure a valid CWD before cloning — if we just deleted a clone and are still
+    # "inside" its path, getcwd() fails and breaks git and Lmod.
+    cd "$HOME" 2>/dev/null || true
+
+    mkdir -p "${sel_base}/sw/${_NEXTENV_WT_SUBDIR}"
+
+    if [[ $branch_on_remote -eq 1 ]]; then
+        run_command git clone -b "$branch_name" "$_NEXTENV_REMOTE" "$wt_dir" \
+            || { echo_error "Clone failed."; return 1; }
+    else
+        run_command git clone "$_NEXTENV_REMOTE" "$wt_dir" \
+            || { echo_error "Clone failed."; return 1; }
+        run_command git -C "$wt_dir" checkout -b "$branch_name" \
+            || { echo_error "Failed to create branch '${branch_name}'."; return 1; }
+    fi
+
+    # Add build artifacts to the clone's local git exclude (avoids modifying tracked .gitignore)
+    local exclude_file="${wt_dir}/.git/info/exclude"
+    mkdir -p "$(dirname "$exclude_file")"
+    for pat in 'next_home/' '.conan2/' '.uv_cache/' '.cache/' '.ccache/'; do
+        grep -qxF "$pat" "$exclude_file" 2>/dev/null \
+            || echo "$pat" >> "$exclude_file"
+    done
+    echo_info "Added build artifact dirs to local git exclude."
+
+    # Create per-worktree cache dirs — each clone owns its own isolated caches.
+    # ~ symlinks will be updated to point here when this clone becomes active.
+    local cache_dir
+    for cache_dir in .cache .ccache .conan2; do
+        [[ -d "${wt_dir}/${cache_dir}" ]] || run_command mkdir -p "${wt_dir}/${cache_dir}"
+    done
+
+    run_command mkdir -p "$wt_nh"
+
+    # Update ~ symlinks to this worktree's dirs before the build runs
+    _nextenv_sync_home_links "$wt_dir"
+
+    echo ""
+    read -rp "Setup + build this clone now? (y/n): " do_build
+    if [[ "$do_build" == "y" || "$do_build" == "Y" ]]; then
+        local _old_nh="$NEXT_HOME" _old_nu="$NEXTUTILS"
+        export NEXT_HOME="$wt_nh"
+        export NEXTUTILS="$wt_dir"
+        (
+            cd "$wt_dir" \
+            && ./setup.sh --fetch-all --create-buildtools-venv \
+            && ./build.sh --install --no-tests
+        )
+        local _brc=$?
+        export NEXT_HOME="$_old_nh"
+        export NEXTUTILS="$_old_nu"
+        [[ $_brc -ne 0 ]] && echo_error "Build failed (exit ${_brc}). Run option c after fixing to retry."
+    else
+        echo_info "Tip: new clones need setup before building."
+        echo_info "  cd ${wt_dir} && ./setup.sh --fetch-all --create-buildtools-venv"
+        echo_info "  Then use option c to build."
+    fi
+
+    _nextenv_switch "worktree" "$dir_name" "$wt_nh" "$wt_dir"
+}
+
+function _nextenv_remove_worktree() {
+    echo ""
+    echo_info "Remove a standalone clone"
+    echo ""
+
+    local -a entries=()
+    local base branch wt_dir nh i=1
+
+    while IFS='|' read -r base branch wt_dir nh; do
+        local sn; sn=$(_nextenv_space_name "$base")
+        printf "  ${CYAN}%s.${NC} [%s] %-25s  %s\n" "$i" "$sn" "$branch" "$wt_dir"
+        entries+=("${branch}|${wt_dir}|${nh}")
+        ((i++))
+    done < <(_nextenv_find_worktrees)
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo_warning "No standalone clones found."
+        return 0
+    fi
+
+    echo ""
+    read -rp "Select clone to remove (0 to cancel): " sel
+    [[ "$sel" == "0" || -z "$sel" ]] && return 0
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 || "$sel" -gt ${#entries[@]} ]]; then
+        echo_error "Invalid selection"
+        return 1
+    fi
+
+    IFS='|' read -r branch wt_dir nh <<< "${entries[$((sel-1))]}"
+
+    local is_active=0
+    if [[ "${NEXTENV_NEXTUTILS:-}" == "$wt_dir" ]]; then
+        is_active=1
+        echo_warning "This is the active clone — removing it will clear the active environment."
+        read -rp "Continue anyway? (y/n): " force_rm
+        [[ "$force_rm" != "y" && "$force_rm" != "Y" ]] && { echo_info "Cancelled."; return 0; }
+    fi
+
+    echo_warning "Will permanently delete: ${wt_dir}"
+    echo_warning "(next_home/ lives inside the clone directory and will also be removed)"
+    read -rp "Type 'yes' to confirm: " confirm
+    [[ "$confirm" != "yes" ]] && { echo_info "Cancelled."; return 0; }
+
+    # Navigate away before deleting — if the shell CWD is inside the clone,
+    # getcwd() will fail after rm -rf and break subsequent commands.
+    case "$PWD" in
+        "${wt_dir}"/*|"${wt_dir}") cd "$HOME" ;;
+    esac
+
+    run_command rm -rf "$wt_dir"
+    echo_success "Removed ${wt_dir}"
+
+    if [[ $is_active -eq 1 ]]; then
+        # Clear state so the shell no longer points at a deleted path
+        printf '' > "$_NEXTENV_STATE_FILE" 2>/dev/null || true
+        unset NEXTENV_TYPE NEXTENV_LABEL NEXTENV_NEXT_HOME NEXTENV_NEXTUTILS
+        echo_info "Active environment cleared. Select or add a new environment."
+    fi
+}
+
+# ── Main menu ──────────────────────────────────────────────────────────────────
+
+function menu-nextenv() {
+    # Build environment list: main clones first, then worktrees, then sw-kits
+    local -a entries=()  # "type|space_name|label|next_home|nextutils"
+    local base branch repo nh sn
+
+    while IFS='|' read -r base branch repo nh; do
+        sn=$(_nextenv_space_name "$base")
+        entries+=("worktree|${sn}|${branch}|${nh}|${repo}")
+    done < <(_nextenv_find_main_repos)
+
+    while IFS='|' read -r base branch wt_dir nh; do
+        sn=$(_nextenv_space_name "$base")
+        entries+=("worktree|${sn}|${branch}|${nh}|${wt_dir}")
+    done < <(_nextenv_find_worktrees)
+
+    local kit_path kit_ver
+    while IFS='|' read -r kit_path kit_ver; do
+        entries+=("swkit|system|${kit_ver}|${kit_path}|")
+    done < <(_nextenv_find_swkits)
+
+    # Display
+    echo ""
+    echo "====================menu-nextenv===================="
+
+    local act_type="${NEXTENV_TYPE:-worktree}"
+    local act_label="${NEXTENV_LABEL:-}"
+    local act_nh="${NEXTENV_NEXT_HOME:-${NEXT_HOME:-}}"
+    local act_nu="${NEXTENV_NEXTUTILS:-${NEXTUTILS:-}}"
+    echo_info "Active: [${act_type}] ${act_label:-<default>}"
+    echo_info "  NEXT_HOME = ${act_nh}"
+    [[ -n "$act_nu" ]] && echo_info "  NEXTUTILS = ${act_nu}"
+    echo ""
+
+    local i=1
+    local -a numbered=()
+    local e type sn label nh nu marker
+
+    echo "  --- Source builds ---"
+    for e in "${entries[@]}"; do
+        IFS='|' read -r type sn label nh nu <<< "$e"
+        [[ "$type" != "worktree" ]] && continue
+
+        marker=""
+        if [[ "$nu" == "$act_nu" && "$nh" == "$act_nh" ]]; then
+            marker="${GREEN}*ACTIVE*${NC}"
+        fi
+
+        local short_nu="${nu}"
+        # Shorten display: strip long prefix
+        for base in $(_nextenv_known_bases); do
+            short_nu="${short_nu#${base}/sw/}"
+        done
+
+        printf "  ${CYAN}%2s.${NC} [%-6s] %-20s  %-32s%b\n" \
+            "$i" "$sn" "$label" "$short_nu" "$marker"
+        numbered+=("$e")
+        ((i++))
+    done
+
+    echo ""
+    echo "  --- Installed sw-kits ---"
+    local has_kit=0
+    for e in "${entries[@]}"; do
+        IFS='|' read -r type sn label nh nu <<< "$e"
+        [[ "$type" != "swkit" ]] && continue
+
+        marker=""
+        [[ "$act_type" == "swkit" && "$label" == "$act_label" ]] && marker="  ${GREEN}*ACTIVE*${NC}"
+        printf "  ${CYAN}%2s.${NC} %s%b\n" "$i" "$label" "$marker"
+        numbered+=("$e")
+        ((i++))
+        has_kit=1
+    done
+    [[ $has_kit -eq 0 ]] && echo "  (none — use option d to install)"
+
+    echo ""
+    echo "  --- Manage ---"
+    echo "  a. Add new standalone clone"
+    echo "  b. Remove a standalone clone"
+    echo "  c. Build active worktree  (./build.sh --install --no-tests)"
+    echo "  d. Run swkit-install.sh  (requires sudo)"
+    echo ""
+    echo "0. Back"
+    echo "===================================================="
+    echo ""
+
+    read -rp "Select an option: " choice
+
+    case "$choice" in
+        0) return 0 ;;
+        a|A) _nextenv_add_worktree    ; menu-nextenv ;;
+        b|B) _nextenv_remove_worktree ; menu-nextenv ;;
+        c|C)
+            local build_nu="${act_nu:-}"
+            # If the active env has no build.sh, offer to pick a worktree to build
+            if [[ -z "$build_nu" || ! -f "${build_nu}/build.sh" ]]; then
+                local -a wt_entries=()
+                local _b _bsn _blabel _bnh _bnu _bi=1
+                echo ""
+                echo "  No active source build. Select a worktree to build:"
+                for e in "${entries[@]}"; do
+                    IFS='|' read -r _b _bsn _blabel _bnh _bnu <<< "$e"
+                    [[ "$_b" != "worktree" || ! -f "${_bnu}/build.sh" ]] && continue
+                    printf "  ${CYAN}%s.${NC} [%-6s] %s\n" "$_bi" "$_bsn" "$_blabel"
+                    wt_entries+=("$_bnu|$_blabel|$_bnh")
+                    ((_bi++))
+                done
+                if [[ ${#wt_entries[@]} -eq 0 ]]; then
+                    echo_error "No buildable worktrees found."
+                else
+                    echo ""
+                    read -rp "Select (0 to cancel): " _bsel
+                    if [[ "$_bsel" =~ ^[1-9][0-9]*$ && "$_bsel" -le ${#wt_entries[@]} ]]; then
+                        IFS='|' read -r build_nu _blabel _bnh <<< "${wt_entries[$((_bsel-1))]}"
+                        _nextenv_switch "worktree" "$_blabel" "$_bnh" "$build_nu"
+                    fi
+                fi
+            fi
+            if [[ -n "$build_nu" && -f "${build_nu}/build.sh" ]]; then
+                if [[ ! -d "${build_nu}/.buildtools_venv" ]]; then
+                    echo_warning "buildtools venv missing — running setup first."
+                    (cd "$build_nu" && run_command ./setup.sh --fetch-all --create-buildtools-venv && run_command ./build.sh --install --no-tests)
+                else
+                    (cd "$build_nu" && run_command ./build.sh --install --no-tests)
+                fi
+            fi
+            menu-nextenv ;;
+        d|D)
+            local installer="${_ENV_PROJECT_DIR}/swkit-install.sh"
+            if [[ -f "$installer" ]]; then
+                echo_warning "sw-kit installation requires sudo — you will be prompted."
+                bash "$installer"
+                local kver
+                kver=$(_nextenv_find_swkits | head -1 | cut -d'|' -f2)
+                if [[ -n "$kver" ]]; then
+                    read -rp "sw-kit installed (${kver}). Switch to it now? (y/n): " sw_sw
+                    [[ "$sw_sw" == "y" || "$sw_sw" == "Y" ]] \
+                        && _nextenv_switch "swkit" "$kver" "/opt/nextsilicon" ""
+                fi
+            else
+                echo_error "swkit-install.sh not found at ${installer}"
+            fi
+            menu-nextenv ;;
+        *)
+            if [[ "$choice" =~ ^[0-9]+$ ]] \
+                && [[ "$choice" -ge 1 ]] \
+                && [[ "$choice" -le ${#numbered[@]} ]]; then
+                IFS='|' read -r type sn label nh nu <<< "${numbered[$((choice-1))]}"
+                if [[ -n "$nh" && ! -d "$nh" ]]; then
+                    echo_warning "NEXT_HOME '${nh}' does not exist yet."
+                    read -rp "Switch anyway (build later)? (y/n): " sw_any
+                    [[ "$sw_any" != "y" && "$sw_any" != "Y" ]] && { menu-nextenv; return; }
+                fi
+                _nextenv_switch "$type" "$label" "$nh" "$nu"
+            else
+                echo_error "Invalid option"
+                menu-nextenv
+            fi ;;
+    esac
+}
+
+echo_info "loading menu-nextenv ..."
