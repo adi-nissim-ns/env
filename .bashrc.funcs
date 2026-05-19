@@ -88,16 +88,20 @@ function setup_python_env() {
 }
 
 function activate_python_env() {
-  echo "Activating Python virtual environment at ${_PY_VENV}"
-  
-  # Check if the virtual environment directory exists
-  if [ ! -d "${_PY_VENV}" ]; then
-    echo "Python virtual environment does not exist at ${_PY_VENV}. Please create it first."
-    return
+  local venv
+  if [[ -n "${NEXTUTILS:-}" && -d "${NEXTUTILS}/.buildtools_venv" ]]; then
+    venv="${NEXTUTILS}/.buildtools_venv"
+  else
+    venv="${_PY_VENV}"
   fi
 
-  # Activate the virtual environment
-  run_command source ${_PY_VENV}/bin/activate && echo "Python virtual environment activated successfully. (to exit write 'deactivate' and to activate write 'activate_python_env')"
+  if [ ! -d "${venv}" ]; then
+    echo_error "Python virtual environment does not exist at ${venv}"
+    return 1
+  fi
+
+  echo_info "Activating Python virtual environment at ${venv}"
+  run_command source "${venv}/bin/activate"
   fix-ps1
 }
 

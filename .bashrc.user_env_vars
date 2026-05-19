@@ -7,7 +7,7 @@
 SHARED_SPACE_NAME=space3
 # SHARED_SPACE_NAME=space2
 
-SPACE_PATH="/${SHARED_SPACE_NAME}/users/${USER}/"
+SPACE_PATH="/${SHARED_SPACE_NAME}/users/${USER}"
 
 # check if dir ${SHARED_SPACE_NAME} 
 if [ ! -d "/${SHARED_SPACE_NAME}" ]; then
