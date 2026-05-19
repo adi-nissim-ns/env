@@ -3,9 +3,9 @@ name: env-menu-nextenv
 description: >
   Deep knowledge of .bashrc.menu.nextenv — the NextSilicon SDK environment
   switcher. Covers architecture, per-worktree cache isolation design, state
-  management, startup apply, known pitfalls, and how to debug or extend the
-  menu. Trigger when the user asks about menu-nextenv, nextenv, switching
-  NEXT_HOME/NEXTUTILS, worktree environments, or cache isolation.
+  management, startup apply, build flow, PS1 indicator, quick switcher, and
+  known pitfalls. Trigger when the user asks about menu-nextenv, nextenv,
+  switching NEXT_HOME/NEXTUTILS, worktree environments, or cache isolation.
 ---
 
 # menu-nextenv — architecture and design notes
@@ -19,9 +19,9 @@ environments and switch between them in the live shell:
 - **Standalone clone ("worktree")** — independent full clone under `sw/nextutils_wt/<branch>/`
 - **sw-kit** — system-installed RPM under `/opt/nextsilicon`
 
-Switching an environment exports new `NEXT_HOME` / `NEXTUTILS` values, patches
-`PATH`, updates all derived vars (`NINJA`, `OBJDUMP`, etc.), and redirects the
-four cache env vars to the new worktree's own directories.
+Switching exports new `NEXT_HOME`/`NEXTUTILS`, patches `PATH`, updates all
+derived vars (`NINJA`, `OBJDUMP`, etc.), redirects the four cache env vars to
+the worktree's own directories, and updates `~/.cache` etc. symlinks.
 
 ## Key files
 
@@ -31,6 +31,40 @@ four cache env vars to the new worktree's own directories.
 | `.nextenv_state` | Persists active environment across shell restarts |
 | `sw/nextutils_wt/<branch>/` | Root of each standalone clone |
 | `sw/nextutils_wt/<branch>/next_home/` | NEXT_HOME for that clone |
+| `swkit-install.sh` | Downloads and installs sw-kit RPMs from artifactory |
+
+## Environment label format
+
+Labels are always `<space>/<dir_name>` — e.g. `space4/master`, `home/feature_foo`.
+This disambiguates when the same branch name exists on multiple spaces.
+
+`_nextenv_startup_apply` auto-migrates old bare labels (e.g. `master`) by
+comparing `NEXTENV_NEXTUTILS` against known bases and rewriting the state file.
+
+## PS1 indicator
+
+`get_nextenv_name` (defined in `.bashrc.menu.nextenv`) is called from
+`PROMPT_COMMAND` via `fix-ps1` in `.bashrc.basic_funcs`. It returns
+` [env:<label>]` when `NEXTENV_LABEL` is set, empty otherwise.
+
+Prompt appearance:
+```
+adin@host ~/myproject [git-branch] [env:space4/master]$
+adin@host ~/myproject [git-branch] [env:1.2.0]$    ← sw-kit active
+adin@host ~/myproject [git-branch]$                ← no nextenv active
+```
+
+## Quick switcher — `nextenv-use`
+
+```bash
+nextenv-use                  # print current active env
+nextenv-use space4/master    # switch by full label
+nextenv-use master           # switch by bare name (first match)
+nextenv-use swkit            # switch to installed sw-kit
+```
+
+Matches against full label, bare dir_name, or raw branch name. After switching,
+`fix-ps1` picks up `NEXTENV_LABEL` automatically at the next prompt.
 
 ## Per-worktree cache isolation (critical design)
 
@@ -38,164 +72,97 @@ Each standalone clone owns **four real directories** (not symlinks to space):
 
 ```
 sw/nextutils_wt/<branch>/
-  .cache/       ← XDG_CACHE_HOME  (toolchain downloads, etc.)
+  .cache/       ← XDG_CACHE_HOME  (toolchain downloads etc.)
   .ccache/      ← CCACHE_DIR      (compiler cache)
   .conan2/      ← CONAN_HOME      (conan package cache)
   .uv_cache/    ← UV_CACHE_DIR    (uv/pip cache)
   next_home/    ← NEXT_HOME
 ```
 
-These are created by `_nextenv_add_worktree` via `mkdir -p`.
+**Why**: conan/ccache are tied to a specific compiler. Sharing the space cache
+causes silent build corruption and makes it impossible to know which artifacts
+are in use.
 
-**Why**: conan/ccache are tied to a specific compiler/toolchain. Mixing
-worktrees sharing the same space3 cache causes silent build corruption and
-makes it impossible to know which worktree's build artifacts are in use.
+`XDG_CACHE_HOME` is also set independently in `.bashrc.user_env_vars` to
+`/spaceN/users/$USER/.cache`. Without override it leaks into worktree builds.
+`_nextenv_patch_env` overrides all four vars for worktree paths.
 
 ## `~` as an active-env pointer
 
-`~/.cache`, `~/.ccache`, `~/.conan2` are **symlinks in `$HOME`** that always
-point to the **active worktree's own directories**. They are NOT the real dirs.
-
-`_nextenv_sync_home_links <nu>` updates them:
+`~/.cache`, `~/.ccache`, `~/.conan2` are symlinks pointing to the active
+worktree's own directories. `_nextenv_sync_home_links <nu>` updates them on
+every switch. It only touches entries that are already symlinks (safe on
+machines without them) and guards against self-pointing with:
 ```bash
-for cache_dir in .cache .ccache .conan2; do
-    home_link="${HOME}/${cache_dir}"
-    [[ -L "$home_link" ]] || continue   # only manage existing symlinks
-    target="${nu}/${cache_dir}"
-    [[ "$target" == "$home_link" ]] && continue   # never self-point (circular symlink guard)
-    [[ -d "$target" ]] || continue
-    current=$(readlink "$home_link")
-    [[ "$target" != "$current" ]] && ln -sfn "$target" "$home_link"
-done
+[[ "$target" == "$home_link" ]] && continue
 ```
 
-**Circular symlink pitfall**: if `nu` resolves to `$HOME`, then
-`target = /home/adin/.cache` == `home_link` → `ln -sfn` creates a self-pointer.
-The guard `[[ "$target" == "$home_link" ]] && continue` prevents this.
-
-If `~/.cache` etc. become circular, restore manually:
+If they become circular, restore manually:
 ```bash
 ln -sfn /space3/users/adin/.{cache,ccache,conan2} ~/
 ```
 
-## Four cache env vars — all must be per-worktree
-
-`XDG_CACHE_HOME` is set independently in `.bashrc.user_env_vars:62` to
-`/spaceN/users/$USER/.cache`. Without override, build scripts use that shared
-path even when a worktree is active. `_nextenv_patch_env` overrides all four:
-
-```bash
-if [[ "$NEXTUTILS" == *"/nextutils_wt/"* ]]; then
-    export CONAN_HOME="${NEXTUTILS}/.conan2"
-    export UV_CACHE_DIR="${NEXTUTILS}/.uv_cache"
-    export XDG_CACHE_HOME="${NEXTUTILS}/.cache"
-    export CCACHE_DIR="${NEXTUTILS}/.ccache"
-else
-    # Restore defaults captured at source time
-    ...
-fi
-```
-
-Defaults are captured at file-source time:
-```bash
-_NEXTENV_DEFAULT_CONAN_HOME="${CONAN_HOME:-}"
-_NEXTENV_DEFAULT_XDG_CACHE_HOME="${XDG_CACHE_HOME:-}"
-_NEXTENV_DEFAULT_CCACHE_DIR="${CCACHE_DIR:-}"
-_NEXTENV_DEFAULT_UV_CACHE_DIR="${UV_CACHE_DIR:-}"
-```
-
 ## State file format
 
-`.nextenv_state` is a flat key=value file:
 ```
-# nextenv active environment — managed by menu-nextenv — do not edit manually
 NEXTENV_TYPE=worktree
-NEXTENV_LABEL=master
-NEXTENV_NEXT_HOME=/home/adin/sw/nextutils_wt/master/next_home
-NEXTENV_NEXTUTILS=/home/adin/sw/nextutils_wt/master
+NEXTENV_LABEL=space4/master
+NEXTENV_NEXT_HOME=/space4/users/adin/sw/nextutils_wt/master/next_home
+NEXTENV_NEXTUTILS=/space4/users/adin/sw/nextutils_wt/master
 ```
 
-Empty file (or missing) = no active env (default). Written by `_nextenv_switch`,
-cleared by `_nextenv_remove_worktree` when the active clone is deleted.
+Empty/missing = no active env. Written by `_nextenv_switch`, cleared by
+`_nextenv_remove_worktree` when the active clone is deleted.
 
 ## Startup apply — `_nextenv_startup_apply`
 
-Called from `.bashrc.user` after all menus are sourced. Critical: it **unsets
-`NEXTENV_*` inherited vars first**, then reads the state file. Without this,
-exported vars from a parent shell survive into child shells even if the state
-file is empty or points to a deleted path.
+1. **Unsets inherited `NEXTENV_*` vars first** — exported vars from a parent
+   shell survive into child shells even when the state file is empty or points
+   to a deleted path. Unset prevents stale apply.
+2. Reads state file
+3. Migrates old-format bare labels to `space/label`
+4. Calls `_nextenv_patch_env` to update the shell
 
+## Build flow
+
+`_nextenv_add_worktree` full sequence on a fresh clone:
+1. `git clone -b <branch>` (with `timeout 8 git ls-remote` pre-check; times out → assume remote branch exists)
+2. `git submodule update --init --recursive`
+3. Add build artifact dirs to `.git/info/exclude`
+4. `mkdir -p` four real cache dirs + `next_home/`
+5. `_nextenv_sync_home_links` — update `~` symlinks before build
+6. Set all four cache env vars explicitly before the build subshell
+7. `./setup.sh --default --force && ./setup.sh --fetch-all --create-buildtools-venv && ./build.sh --install --no-tests`
+8. `_nextenv_switch "worktree" "<space>/<dir>" ...`
+
+Option `c` retry logic:
+- Checks `[[ -x .buildtools_venv/bin/conan ]]` (not just dir existence) — an
+  incomplete venv (missing conan/click) runs `./setup.sh --default --force && ./setup.sh --create-buildtools-venv` first
+- `_nextenv_prep_build` runs before every build: cleans stale uv `.tmp*` dirs
+  and releases NFS lock files in `.buildtools_venv` via `fuser -TERM` / `fuser -KILL`
+
+Seeding conan cache to avoid re-downloading (~600 MB) on a new clone:
 ```bash
-function _nextenv_startup_apply() {
-    unset NEXTENV_TYPE NEXTENV_LABEL NEXTENV_NEXT_HOME NEXTENV_NEXTUTILS
-    [[ ! -f "$_NEXTENV_STATE_FILE" ]] && return 0
-    # ... parse state file ...
-    [[ -z "$new_nh" && -z "$new_nu" ]] && return 0
-    _nextenv_patch_env "$new_nh" "$new_nu"
-}
+rsync -a /space3/users/adin/.conan2/ ~/sw/nextutils_wt/<branch>/.conan2/
 ```
 
-## Known pitfalls and fixes
+## Known pitfalls
 
-### Terminal doesn't load (hangs at startup)
-1. **Inherited stale NEXTENV_* vars** pointing at deleted paths — fixed by
-   `unset NEXTENV_*` at top of `_nextenv_startup_apply`.
-2. **CARGO_HOME check** in `.bashrc.user` used bare `${CARGO_HOME}` which is
-   never set at startup → `[ -d "" ]` = false → blocked on `read -p`.
-   Fixed: `${CARGO_HOME:-${HOME}/.cargo}`.
-3. **Python venv check** used wrong variable `$setup_rust_env` instead of
-   `$setup_python_env` and had `return 1` on skip which aborted all of
-   `.bashrc.user`. Both fixed.
+| Symptom | Cause | Fix |
+|---|---|---|
+| Terminal hangs at startup | Inherited stale NEXTENV_* vars | `unset NEXTENV_*` in `_nextenv_startup_apply` |
+| Terminal hangs (CARGO_HOME prompt) | `${CARGO_HOME}` always empty → `[ -d "" ]` false | Use `${CARGO_HOME:-${HOME}/.cargo}` |
+| `[env:master]` on both space4 and home | Old bare label in state file | `_nextenv_startup_apply` auto-migrates on next start |
+| conan uses space3 cache | `CONAN_HOME` not set before build subshell | Set all four cache vars in `_nextenv_add_worktree` before subshell |
+| `ModuleNotFoundError: click` | Setup failed mid-way; venv dir exists but conan not installed | Check for `conan` binary not just venv dir |
+| `[Errno 39] Directory not empty` (patch-ng) | Stale uv `.tmp*` from failed build | `_nextenv_prep_build` cleans them before every build |
+| NFS lock blocks `setup.sh rm -rf .buildtools_venv` | Process holds `.nfs*` file | `_nextenv_prep_build` runs `fuser -TERM/-KILL` |
+| `getcwd` fails after rm -rf active clone | Shell CWD inside deleted dir | `cd "$HOME"` before `rm -rf` and before `git clone` |
+| Submodule dirs missing (CMake error) | `git clone` without submodule init | `git submodule update --init --recursive` after every clone |
 
-### `getcwd` failure after `rm -rf` of active clone
-If the shell's CWD is inside the deleted directory, all subsequent commands
-fail with `cannot access parent directories`. Two places guard against this:
-- `_nextenv_remove_worktree`: `case "$PWD" in "${wt_dir}"/*|"${wt_dir}") cd "$HOME" ;; esac` before `rm -rf`
-- `_nextenv_add_worktree`: `cd "$HOME" 2>/dev/null || true` before `git clone`
+## cdnext / cdutils alias ordering
 
-### Source builds empty / not found
-`_nextenv_find_worktrees` checks `[[ -d "${wt_dir}/.git" ]]`. If the directory
-exists but `.git` is missing (stale NFS, incomplete clone), it is silently
-skipped. Remove the stale directory and re-clone.
-
-### First build re-downloads toolchains (~600 MB)
-Per-worktree isolation means each new clone starts with an empty `.cache/`.
-Seed it from an existing clone to save time:
-```bash
-cp -r /space3/users/adin/.cache/nextutils_fetch ~/sw/nextutils_wt/master/.cache/
-```
-
-### Stale NFS handle
-`rm -rf` may fail with "Stale file handle" on NFS mounts. Open a fresh shell
-and retry; the NFS mount usually recovers.
-
-## Adding a new standalone clone
-
-`_nextenv_add_worktree` flow:
-1. Pick space (space2/3/4 or $HOME)
-2. Enter branch name → sanitize to filesystem-safe `dir_name`
-3. Check remote for branch existence via `git ls-remote`
-4. Confirm + clone (`git clone -b <branch>` or clone + `checkout -b`)
-5. Add build artifact dirs to `.git/info/exclude` (not tracked `.gitignore`)
-6. `mkdir -p` four real cache dirs inside the clone
-7. `_nextenv_sync_home_links` → update `~/.cache` etc. to point here
-8. Optional build: `cd $wt_dir && ./setup.sh --fetch-all --create-buildtools-venv && ./build.sh --install --no-tests`
-9. `_nextenv_switch "worktree" ...` → write state, patch env
-
-## Removing a standalone clone
-
-`_nextenv_remove_worktree` allows removing the **active** clone (with
-confirmation). Steps:
-1. Detect if active (`NEXTENV_NEXTUTILS == wt_dir`)
-2. `cd $HOME` if CWD is inside clone
-3. `rm -rf $wt_dir`
-4. If was active: clear state file, `unset NEXTENV_*`
-
-## Extending the menu
-
-To support a new environment type:
-1. Add a `_nextenv_find_<type>` function emitting `base|label|path|next_home`
-2. Add entries to `menu-nextenv()` under the appropriate section header
-3. Handle the type in `_nextenv_patch_env` if it needs custom cache paths
-4. The state file format is open — add new `NEXTENV_<KEY>=` lines as needed,
-   just `unset` them at the top of `_nextenv_startup_apply`
+These aliases depend on `NEXT_HOME`/`NEXTUTILS` which may be updated by
+`_nextenv_startup_apply`. They are created **after** `_nextenv_startup_apply`
+in `.bashrc.user` to avoid "Do nothing: path does not exist" warnings.
+`_nextenv_patch_env` also refreshes them on every switch.

@@ -265,6 +265,19 @@ function _nextenv_startup_apply() {
 
     [[ -z "$new_nh" && -z "$new_nu" ]] && return 0
 
+    # Migrate old-format labels that lack a space prefix (e.g. "master" → "space4/master")
+    if [[ -n "${NEXTENV_LABEL:-}" && "${NEXTENV_LABEL}" != */* && -n "$new_nu" ]]; then
+        local _base _sn
+        while IFS= read -r _base; do
+            if [[ "$new_nu" == "${_base}/"* ]]; then
+                _sn=$(_nextenv_space_name "$_base")
+                export NEXTENV_LABEL="${_sn}/${NEXTENV_LABEL}"
+                _nextenv_write_state "${NEXTENV_TYPE}" "${NEXTENV_LABEL}" "$new_nh" "$new_nu"
+                break
+            fi
+        done < <(_nextenv_known_bases)
+    fi
+
     if [[ -n "$new_nh" && ! -d "$new_nh" ]]; then
         echo_warning "nextenv: NEXT_HOME '${new_nh}' does not exist yet (build to create it)"
     fi
@@ -437,7 +450,8 @@ function _nextenv_add_worktree() {
         echo_info "  Then use option c to build."
     fi
 
-    _nextenv_switch "worktree" "$dir_name" "$wt_nh" "$wt_dir"
+    local _sn; _sn=$(_nextenv_space_name "$sel_base")
+    _nextenv_switch "worktree" "${_sn}/${dir_name}" "$wt_nh" "$wt_dir"
 }
 
 function _nextenv_remove_worktree() {
@@ -509,12 +523,12 @@ function menu-nextenv() {
 
     while IFS='|' read -r base branch repo nh; do
         sn=$(_nextenv_space_name "$base")
-        entries+=("worktree|${sn}|${branch}|${nh}|${repo}")
+        entries+=("worktree|${sn}|${sn}/${branch}|${nh}|${repo}")
     done < <(_nextenv_find_main_repos)
 
     while IFS='|' read -r base branch wt_dir nh; do
         sn=$(_nextenv_space_name "$base")
-        entries+=("worktree|${sn}|${branch}|${nh}|${wt_dir}")
+        entries+=("worktree|${sn}|${sn}/$(basename "$wt_dir")|${nh}|${wt_dir}")
     done < <(_nextenv_find_worktrees)
 
     local kit_path kit_ver
@@ -662,6 +676,72 @@ function menu-nextenv() {
                 menu-nextenv
             fi ;;
     esac
+}
+
+# ── PS1 hook ──────────────────────────────────────────────────────────────────
+
+# Called from PROMPT_COMMAND via fix-ps1. Returns " [env:<label>]" when an
+# nextenv environment is active; empty string otherwise.
+function get_nextenv_name() {
+    [[ -n "${NEXTENV_LABEL:-}" ]] && echo " [env:${NEXTENV_LABEL}]"
+}
+
+# ── Quick switcher ─────────────────────────────────────────────────────────────
+
+# nextenv-use [label]  — switch to a named environment without opening the menu.
+# With no argument: print the currently active environment.
+# Label matching: exact dir_name or branch name for worktrees; "swkit" for sw-kit.
+function nextenv-use() {
+    local target="${1:-}"
+
+    if [[ -z "$target" ]]; then
+        echo_info "Active: [${NEXTENV_TYPE:-<none>}] ${NEXTENV_LABEL:-<none>}"
+        [[ -n "${NEXTENV_NEXT_HOME:-}" ]] && echo_info "  NEXT_HOME = ${NEXTENV_NEXT_HOME}"
+        [[ -n "${NEXTENV_NEXTUTILS:-}" ]] && echo_info "  NEXTUTILS = ${NEXTENV_NEXTUTILS}"
+        return 0
+    fi
+
+    local base branch wt_dir nh dir_name sn label
+
+    # Worktrees — label is "space/dir_name"; match on full label or bare dir_name/branch
+    while IFS='|' read -r base branch wt_dir nh; do
+        sn=$(_nextenv_space_name "$base")
+        dir_name=$(basename "$wt_dir")
+        label="${sn}/${dir_name}"
+        if [[ "$label" == "$target" || "$dir_name" == "$target" || "$branch" == "$target" ]]; then
+            _nextenv_switch "worktree" "$label" "$nh" "$wt_dir"
+            return 0
+        fi
+    done < <(_nextenv_find_worktrees)
+
+    # Main clones — label is "space/branch"
+    local repo
+    while IFS='|' read -r base branch repo nh; do
+        sn=$(_nextenv_space_name "$base")
+        label="${sn}/${branch}"
+        if [[ "$label" == "$target" || "$branch" == "$target" ]]; then
+            _nextenv_switch "worktree" "$label" "$nh" "$repo"
+            return 0
+        fi
+    done < <(_nextenv_find_main_repos)
+
+    # sw-kit (match "swkit" or "swkit-*")
+    if [[ "$target" == swkit* ]]; then
+        local kit_path kit_ver
+        while IFS='|' read -r kit_path kit_ver; do
+            _nextenv_switch "swkit" "$kit_ver" "$kit_path" ""
+            return 0
+        done < <(_nextenv_find_swkits)
+        echo_error "No sw-kit installed"
+        return 1
+    fi
+
+    echo_error "No environment matching '${target}'"
+    echo_info  "Available: $(
+        { _nextenv_find_worktrees; _nextenv_find_main_repos; } \
+            | cut -d'|' -f3 | sort -u | tr '\n' ' '
+        )swkit"
+    return 1
 }
 
 echo_info "loading menu-nextenv ..."

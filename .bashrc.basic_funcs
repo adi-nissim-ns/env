@@ -211,7 +211,7 @@ function fix-ps1() {
         fi
         echo  $VENV_NAME  
     }
-    export PROMPT_COMMAND='PS1="\[\]$(color_wrap $GREEN)\$(get_venv_name) $(color_wrap $txtylw)\u$(color_wrap $NC)@$(color_wrap $txtylw)\h $(color_wrap $bldcyn)\w$(color_wrap $RED) \$(parse_git_branch)$(color_wrap $NC)\$ \[\]"'
+    export PROMPT_COMMAND='PS1="\[\]$(color_wrap $GREEN)\$(get_venv_name)$(color_wrap $txtylw)\u$(color_wrap $NC)@$(color_wrap $txtylw)\h$(color_wrap $MAGENTA)\$(get_nextenv_name) $(color_wrap $bldcyn)\w$(color_wrap $RED) \$(parse_git_branch)$(color_wrap $NC)\$ \[\]"'
     PS1=${PROMPT_COMMAND}
 }
 
