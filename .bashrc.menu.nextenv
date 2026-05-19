@@ -748,11 +748,16 @@ function menu-nextenv() {
             fi
             if [[ -n "$build_nu" && -f "${build_nu}/build.sh" ]]; then
                 _nextenv_prep_build "$build_nu"
+                run_command rm -rf "${build_nu}/build"
+                run_command rm -rf "${build_nu}/.conan2/"*
+                run_command rm -rf "${build_nu}/.cache/"*
+                run_command rm -rf "${build_nu}/.ccache/"*
+                run_command rm -rf "${build_nu}/.uv_cache/"*
                 if [[ ! -x "${build_nu}/.buildtools_venv/bin/conan" ]]; then
-                    echo_warning "buildtools venv incomplete — running setup first."
-                    (cd "$build_nu" && run_command ./setup.sh --default --force && run_command ./setup.sh --create-buildtools-venv && run_command ./build.sh --install --no-tests)
+                    echo_warning "buildtools venv incomplete — recreating venv."
+                    (cd "$build_nu" && run_command pwd && run_command ./setup.sh --default --force && run_command ./setup.sh --create-buildtools-venv && run_command ./build.sh --install --no-tests)
                 else
-                    (cd "$build_nu" && run_command ./build.sh --install --no-tests)
+                    (cd "$build_nu" && run_command pwd && run_command ./setup.sh --default --force && run_command ./build.sh --install --no-tests)
                 fi
             fi
             menu-nextenv ;;
