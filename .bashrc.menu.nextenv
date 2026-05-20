@@ -753,12 +753,10 @@ function menu-nextenv() {
                 run_command rm -rf "${build_nu}/.cache/"*
                 run_command rm -rf "${build_nu}/.ccache/"*
                 run_command rm -rf "${build_nu}/.uv_cache/"*
-                if [[ ! -x "${build_nu}/.buildtools_venv/bin/conan" ]]; then
-                    echo_warning "buildtools venv incomplete — recreating venv."
-                    (cd "$build_nu" && run_command pwd && run_command ./setup.sh --default --force && run_command ./setup.sh --create-buildtools-venv && run_command ./build.sh --install --no-tests)
-                else
-                    (cd "$build_nu" && run_command pwd && run_command ./setup.sh --default --force && run_command ./build.sh --install --no-tests)
-                fi
+                (cd "$build_nu" && run_command pwd \
+                    && run_command ./setup.sh --default --force \
+                    && run_command ./setup.sh --fetch-all --create-buildtools-venv \
+                    && run_command ./build.sh --install --no-tests)
             fi
             menu-nextenv ;;
         d|D)
