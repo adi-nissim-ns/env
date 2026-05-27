@@ -22,6 +22,15 @@ BASHRC="${HOME}/.bashrc.${USER}"
 # Optional: export ARTIFACTORY_API_KEY for authenticated access
 API_KEY="${ARTIFACTORY_API_KEY:-}"
 
+# Source swkit-githash / swkit-date helpers so _best_file can rank installers
+# by commit date instead of the embedded build number — build numbers across
+# channels and forks (244 vs 2621) don't reliably reflect chronology.
+GITHASH_HELPERS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.bashrc.swkit-githash"
+if [[ -f "$GITHASH_HELPERS" ]]; then
+    # shellcheck source=/dev/null
+    source "$GITHASH_HELPERS"
+fi
+
 # ── Colors (only if stdout is a terminal) ─────────────────────────────────────
 if [[ -t 1 ]]; then
     YELLOW=$'\033[1;33m'
@@ -106,18 +115,39 @@ _list_files() {
         | grep -Ev '(^do-not-use-|-remove\.sh$)'
 }
 
-# Read from stdin: return the file with the highest build number.
-# If quality_filter is given, only consider files of that quality.
+# Read from stdin: return the newest file by commit date (via swkit-date, when
+# available); falls back to highest build number when the date can't be
+# resolved. If quality_filter is given, only consider files of that quality.
 _best_file() {
     local quality_filter="${1:-}"
-    local best="" best_build=-1
-    local fname q b
+    local -a candidates=()
+    local fname q
     while IFS= read -r fname; do
         [[ -z "$fname" ]] && continue
         if [[ -n "$quality_filter" ]]; then
             q=$(_quality "$fname")
             [[ "$q" != "$quality_filter" ]] && continue
         fi
+        candidates+=("$fname")
+    done
+
+    [[ ${#candidates[@]} -eq 0 ]] && return 0
+
+    if command -v swkit-date &>/dev/null; then
+        local best_fname="" best_date="" d
+        for fname in "${candidates[@]}"; do
+            d=$(swkit-date "$fname" 2>/dev/null) || d=""
+            [[ -z "$d" ]] && continue
+            if [[ -z "$best_date" || "$d" > "$best_date" ]]; then
+                best_date="$d"
+                best_fname="$fname"
+            fi
+        done
+        [[ -n "$best_fname" ]] && { echo "$best_fname"; return 0; }
+    fi
+
+    local best="" best_build=-1 b
+    for fname in "${candidates[@]}"; do
         b=$(_build_num "$fname")
         [[ "$b" =~ ^[0-9]+$ ]] || continue
         (( b > best_build )) && { best_build=$b; best="$fname"; }
@@ -156,15 +186,36 @@ _clear_swkit() {
         dkms_mods=""
     fi
 
-    if [[ -z "$rpms" && -z "$dkms_mods" && ! -d /opt/nextsilicon ]]; then
+    # nextruntime's %post creates this with plain `ln -s` (no -f); a leftover
+    # from a previous install makes the scriptlet exit 1 on reinstall.
+    local binfmt_conf="/usr/lib/binfmt.d/nextloader.conf"
+    local has_binfmt=0
+    [[ -e "$binfmt_conf" || -L "$binfmt_conf" ]] && has_binfmt=1
+
+    # Same problem: nextruntime's %post does `cp -s` (no -f) for these systemd
+    # user-unit symlinks, and `rpm -e` doesn't clean them up.
+    local user_links=(
+        /usr/lib/systemd/user/nextsilicon.service
+        /usr/lib/systemd/user/nextsilicon-no-hardware.service.d/20-no-hardware.conf
+        /usr/lib/systemd/user/nextsilicon@.service.d/drop_in.conf
+    )
+    local stale_user_links=()
+    local l
+    for l in "${user_links[@]}"; do
+        [[ -e "$l" || -L "$l" ]] && stale_user_links+=("$l")
+    done
+
+    if [[ -z "$rpms" && -z "$dkms_mods" && ! -d /opt/nextsilicon && $has_binfmt -eq 0 && ${#stale_user_links[@]} -eq 0 ]]; then
         echo "  Nothing to clear."
         return 0
     fi
 
     echo "  Will remove:"
-    [[ -n "$dkms_mods" ]]     && echo "    DKMS      : $(echo "$dkms_mods" | tr '\n' ' ')"
-    [[ -n "$rpms" ]]          && echo "    RPMs      : $(echo "$rpms"      | tr '\n' ' ')"
-    [[ -d /opt/nextsilicon ]] && echo "    Directory : /opt/nextsilicon"
+    [[ -n "$dkms_mods" ]]              && echo "    DKMS      : $(echo "$dkms_mods" | tr '\n' ' ')"
+    [[ -n "$rpms" ]]                   && echo "    RPMs      : $(echo "$rpms"      | tr '\n' ' ')"
+    [[ -d /opt/nextsilicon ]]          && echo "    Directory : /opt/nextsilicon"
+    [[ $has_binfmt -eq 1 ]]            && echo "    Binfmt    : ${binfmt_conf}"
+    [[ ${#stale_user_links[@]} -gt 0 ]] && echo "    User units: ${stale_user_links[*]}"
 
     if [[ -n "$dkms_mods" ]]; then
         while IFS= read -r mod; do
@@ -182,6 +233,17 @@ _clear_swkit() {
     if [[ -d /opt/nextsilicon ]]; then
         echo "  Removing /opt/nextsilicon..."
         sudo rm -rf /opt/nextsilicon
+    fi
+
+    if [[ $has_binfmt -eq 1 ]]; then
+        echo "  Removing ${binfmt_conf}..."
+        sudo rm -f "$binfmt_conf"
+        sudo systemctl restart systemd-binfmt.service 2>/dev/null || true
+    fi
+
+    if [[ ${#stale_user_links[@]} -gt 0 ]]; then
+        echo "  Removing stale systemd user-unit symlinks..."
+        sudo rm -f "${stale_user_links[@]}"
     fi
 }
 
@@ -280,10 +342,13 @@ _install() {
     fi
 
     echo "  Running installer (sudo required)..."
+    # Invoke from $tmpdir so the installer's trailing popd lands in /tmp, not
+    # the caller's cwd — on NFS root_squash homes root cannot chdir back and
+    # popd exits 1, falsely flagging the install as failed.
     if [[ -n "$lib_arg" ]]; then
-        sudo "${tmpdir}/${filename}" "$lib_arg" || { echo "  Installer failed."; return 1; }
+        ( cd "$tmpdir" && sudo "./${filename}" "$lib_arg" ) || { echo "  Installer failed."; return 1; }
     else
-        sudo "${tmpdir}/${filename}" || { echo "  Installer failed."; return 1; }
+        ( cd "$tmpdir" && sudo "./${filename}" ) || { echo "  Installer failed."; return 1; }
     fi
 
     [[ -f /etc/profile.d/nextsilicon.sh ]] && source /etc/profile.d/nextsilicon.sh
@@ -376,9 +441,9 @@ _flow_stable_rc() {
     fi
 }
 
-# ── Flow 3: install latest kit (rc channel) ────────────────────────────────────
-# Picks the highest-build ns-sw-kit-* (newest CI format) in the latest rc version.
-# Falls back to any file if no ns-sw-kit-* exists.
+# ── Flow 3: install latest kit ─────────────────────────────────────────────────
+# Picks the chronologically newest file (by commit date, via swkit-date) in the
+# latest rc version, regardless of quality prefix. Falls back to release.
 _flow_latest() {
     local channel ver files filename
 
@@ -389,8 +454,7 @@ _flow_latest() {
         ver=$(_list_versions "$channel" 2>/dev/null | tail -1) || continue
         [[ -z "$ver" ]] && continue
         files=$(_list_files "$channel" "$ver" 2>/dev/null) || continue
-        filename=$(echo "$files" | _best_file "latest")
-        [[ -z "$filename" ]] && filename=$(echo "$files" | _best_file "")
+        filename=$(echo "$files" | _best_file "")
         [[ -n "$filename" ]] && break
     done
 
@@ -518,51 +582,9 @@ main() {
     echo "==========================================="
     echo ""
 
-    # Pre-fetch kit names for options 1 and 2 to show in menu
-    local stable_label="" latest_label=""
-    local _ver _files _fname _info
-
-    _info=$(_read_latest_txt 2>/dev/null) && [[ -n "$_info" ]] && {
-        _ver="${_info%%|*}"
-        _fname="${_info##*|}"
-        _files=$(_list_files "release" "$_ver" 2>/dev/null) || _files=""
-        echo "$_files" | grep -qxF "$_fname" && stable_label="$_fname"
-    }
-    if [[ -z "$stable_label" ]]; then
-        _ver=$(_list_versions "release" 2>/dev/null | tail -1)
-        [[ -n "$_ver" ]] && {
-            _files=$(_list_files "release" "$_ver" 2>/dev/null) || _files=""
-            stable_label=$(echo "$_files" | _best_file "stable")
-            [[ -z "$stable_label" ]] && stable_label=$(echo "$_files" | _best_file "")
-        }
-    fi
-
-    local _ch
-    # stable RC: latest stable-* in latest rc version
-    local stable_rc_label=""
-    _ver=$(_list_versions "rc" 2>/dev/null | tail -1)
-    [[ -n "$_ver" ]] && {
-        _files=$(_list_files "rc" "$_ver" 2>/dev/null) || _files=""
-        stable_rc_label=$(echo "$_files" | _best_file "stable")
-    }
-
-    for _ch in "rc" "release"; do
-        _ver=$(_list_versions "$_ch" 2>/dev/null | tail -1)
-        [[ -z "$_ver" ]] && continue
-        _files=$(_list_files "$_ch" "$_ver" 2>/dev/null) || continue
-        latest_label=$(echo "$_files" | _best_file "latest")
-        [[ -z "$latest_label" ]] && latest_label=$(echo "$_files" | _best_file "")
-        [[ -n "$latest_label" ]] && break
-    done
-
-    local s1="last stable kit" s2="last stable RC" s3="last kit"
-    [[ -n "$stable_label" ]]    && s1="last stable kit  (${stable_label})"
-    [[ -n "$stable_rc_label" ]] && s2="last stable RC   (${stable_rc_label})"
-    [[ -n "$latest_label" ]]    && s3="last kit         (${latest_label})"
-
-    echo "${GREEN}  1) Install ${s1}  [default]${NC}"
-    echo "${GREEN}  2) Install ${s2}${NC}"
-    echo "${GREEN}  3) Install ${s3}${NC}"
+    echo "${GREEN}  1) Install last stable kit  [default]${NC}"
+    echo "${GREEN}  2) Install last stable RC${NC}"
+    echo "${GREEN}  3) Install last kit${NC}"
     echo "${GREEN}  4) List available kits and select${NC}"
     echo "${GREEN}  5) Clear swkit${NC}"
     echo "${GREEN}  6) Exit${NC}"

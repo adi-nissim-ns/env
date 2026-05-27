@@ -1,0 +1,154 @@
+# swkit-githash / swkit-date / swkit-info: introspect a swkit build.
+#
+# Inputs accepted by all three:
+#   <build-number>                          e.g. 293
+#   <swkit-*.sh filename>                   e.g. broken-dev-next-sw-kit-rocky-9-1.2.0-272.sh
+#   </path/to/swkit-*.sh>                   absolute or relative path
+#
+# Build-number rule: if the trailing number is >3 digits the first 3 are the
+# Jenkins build (the rest is a subversion), e.g. 2594 -> 259.
+#
+# Resolution paths:
+#   swkit-githash  -> $XDG_CACHE_HOME/swkit-githash/builds/<digits> (build-number
+#                     -> SHA is immutable, so the cache is permanent); on miss,
+#                     Artifactory storage API + range-fetch of the installer's
+#                     first 10KB (greps the embedded "revision <sha>" line);
+#                     falls back to the swkit-nightly-train Jenkins job API.
+#   swkit-date     -> swkit-githash, then bare-clone cache at
+#                     $XDG_CACHE_HOME/swkit-githash/nextutils.git, lazily
+#                     `git fetch`-ing the SHA over SSH from
+#                     git@github.com:nextsilicon/nextutils.git.
+#   swkit-info     -> both, labeled.
+
+_swkit-githash-digits() {
+    local input="$1"
+    if [[ -z "$input" ]]; then
+        echo "usage: <build-number|swkit-*.sh filename>" >&2
+        return 2
+    fi
+    local digits
+    if [[ "$input" == *.sh ]]; then
+        digits="$(basename -- "$input" .sh)"
+        digits="${digits##*-}"
+    else
+        digits="$input"
+    fi
+    if ! [[ "$digits" =~ ^[0-9]+$ ]]; then
+        echo "could not extract build number from '$input'" >&2
+        return 2
+    fi
+    if (( ${#digits} > 3 )); then
+        digits="${digits:0:3}"
+    fi
+    printf '%s\n' "$digits"
+}
+
+_swkit-githash-from-artifactory() {
+    local digits="$1"
+    local list_url="https://artifactory.k8s.nextsilicon.com/artifactory/api/storage/generic-repo/nextsilicon-files/rc/rocky-9/1.2.0/"
+    local file
+    file="$(curl -sSf "$list_url" \
+        | jq -r --arg suf "-${digits}.sh" \
+            '.children[]?.uri | select(endswith($suf))' \
+        | head -n1)"
+    file="${file#/}"
+    [[ -n "$file" ]] || return 1
+
+    local dl_url="https://artifactory.k8s.nextsilicon.com/artifactory/generic-repo/nextsilicon-files/rc/rocky-9/1.2.0/${file}"
+    local sha
+    sha="$(curl -sSf -r 0-10239 "$dl_url" \
+        | grep -a -o -E 'revision [0-9a-f]{40}' \
+        | head -n1 \
+        | awk '{print $2}')"
+    [[ -n "$sha" ]] || return 1
+    printf '%s\n' "$sha"
+}
+
+_swkit-githash-from-jenkins() {
+    local digits="$1"
+    local url="https://nsjenkins.k8s.nextsilicon.com/job/swkit-nightly-train/${digits}/api/json"
+    local body
+    body="$(curl -sSf "$url")" || return 1
+    local sha
+    sha="$(printf '%s' "$body" | jq -r '
+        [ .actions[]?
+          | select(.remoteUrls? != null
+                   and (any(.remoteUrls[]?; test("nextutils\\.git$"))))
+          | .lastBuiltRevision.SHA1 ] | .[0] // empty
+    ')"
+    [[ -n "$sha" ]] || return 1
+    printf '%s\n' "$sha"
+}
+
+_swkit-date-from-sha() {
+    local sha="$1"
+    [[ -n "$sha" ]] || return 2
+    local cache="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/nextutils.git"
+    if [[ ! -d "$cache" ]]; then
+        mkdir -p "$(dirname "$cache")" || return 1
+        git init --bare --quiet "$cache" || return 1
+    fi
+    local date
+    date="$(git -C "$cache" show -s --format=%cI "$sha" 2>/dev/null)"
+    if [[ -z "$date" ]]; then
+        git -C "$cache" fetch --quiet --no-tags --depth=1 \
+            git@github.com:nextsilicon/nextutils.git "$sha" 2>/dev/null || return 1
+        date="$(git -C "$cache" show -s --format=%cI "$sha" 2>/dev/null)"
+    fi
+    [[ -n "$date" ]] || return 1
+    printf '%s\n' "$date"
+}
+
+swkit-githash() {
+    local digits
+    digits="$(_swkit-githash-digits "$1")" || return $?
+
+    local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/builds"
+    local cache_file="$cache_dir/$digits"
+    local sha
+    if [[ -s "$cache_file" ]]; then
+        sha="$(<"$cache_file")"
+        if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s\n' "$sha"
+            return 0
+        fi
+    fi
+
+    if sha="$(_swkit-githash-from-artifactory "$digits")" && [[ -n "$sha" ]]; then
+        mkdir -p "$cache_dir" && printf '%s\n' "$sha" >"$cache_file"
+        printf '%s\n' "$sha"
+        return 0
+    fi
+    if sha="$(_swkit-githash-from-jenkins "$digits")" && [[ -n "$sha" ]]; then
+        mkdir -p "$cache_dir" && printf '%s\n' "$sha" >"$cache_file"
+        printf '%s\n' "$sha"
+        return 0
+    fi
+
+    echo "swkit-githash: could not resolve build $digits via Artifactory or Jenkins" >&2
+    return 1
+}
+
+swkit-date() {
+    local sha
+    sha="$(swkit-githash "$1")" || return $?
+    local date
+    date="$(_swkit-date-from-sha "$sha")" || {
+        echo "swkit-date: got SHA $sha but could not resolve commit date" >&2
+        return 1
+    }
+    printf '%s\n' "$date"
+}
+
+swkit-info() {
+    local sha
+    sha="$(swkit-githash "$1")" || return $?
+    local date
+    if ! date="$(_swkit-date-from-sha "$sha")"; then
+        printf 'sha:  %s\n' "$sha"
+        echo "swkit-info: got SHA $sha but could not resolve commit date" >&2
+        return 1
+    fi
+    printf 'sha:  %s\n' "$sha"
+    printf 'date: %s\n' "$date"
+}
