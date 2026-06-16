@@ -828,41 +828,39 @@ main() {
     echo "==========================================="
     echo ""
 
-    # Resolve labels from the local cache only — no HTTP, no git, no waiting.
-    # On a cold cache (first launch ever) all reads miss and the menu simply
-    # shows the static option text. Subsequent launches show filenames and,
-    # when the date worker has finished, dates too.
+    # Resolve labels from cached listings when available, falling back to a
+    # live fetch on a cold cache so the menu always shows filenames.
     local stable_label="" stable_rc_label="" latest_label=""
     local _ver _files _fname _info _ch
 
     # Option 1: latest stable.
-    if _info=$(_read_latest_txt --cache-only 2>/dev/null) && [[ -n "$_info" ]]; then
+    if _info=$(_read_latest_txt 2>/dev/null) && [[ -n "$_info" ]]; then
         _ver="${_info%%|*}"
         _fname="${_info##*|}"
-        _files=$(_list_files --cache-only "release" "$_ver" 2>/dev/null) || _files=""
+        _files=$(_list_files "release" "$_ver" 2>/dev/null) || _files=""
         echo "$_files" | grep -qxF "$_fname" && stable_label="$_fname"
     fi
     if [[ -z "$stable_label" ]]; then
-        _ver=$(_list_versions --cache-only "release" 2>/dev/null | tail -1)
+        _ver=$(_list_versions "release" 2>/dev/null | tail -1)
         if [[ -n "$_ver" ]]; then
-            _files=$(_list_files --cache-only "release" "$_ver" 2>/dev/null) || _files=""
+            _files=$(_list_files "release" "$_ver" 2>/dev/null) || _files=""
             stable_label=$(echo "$_files" | _best_file "stable")
             [[ -z "$stable_label" ]] && stable_label=$(echo "$_files" | _best_file "")
         fi
     fi
 
     # Option 2: latest stable RC.
-    _ver=$(_list_versions --cache-only "rc" 2>/dev/null | tail -1)
+    _ver=$(_list_versions "rc" 2>/dev/null | tail -1)
     if [[ -n "$_ver" ]]; then
-        _files=$(_list_files --cache-only "rc" "$_ver" 2>/dev/null) || _files=""
+        _files=$(_list_files "rc" "$_ver" 2>/dev/null) || _files=""
         stable_rc_label=$(echo "$_files" | _best_file "stable")
     fi
 
     # Option 3: latest kit — rc first, fall back to release.
     for _ch in "rc" "release"; do
-        _ver=$(_list_versions --cache-only "$_ch" 2>/dev/null | tail -1)
+        _ver=$(_list_versions "$_ch" 2>/dev/null | tail -1)
         [[ -z "$_ver" ]] && continue
-        _files=$(_list_files --cache-only "$_ch" "$_ver" 2>/dev/null) || continue
+        _files=$(_list_files "$_ch" "$_ver" 2>/dev/null) || continue
         latest_label=$(echo "$_files" | _best_file "")
         [[ -n "$latest_label" ]] && break
     done
