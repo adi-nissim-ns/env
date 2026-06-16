@@ -1,6 +1,7 @@
-# swkit-githash / swkit-date / swkit-info: introspect a swkit build.
+# swkit-githash / swkit-date / swkit-date-cached / swkit-info: introspect a
+# swkit build.
 #
-# Inputs accepted by all three:
+# Inputs accepted by all four:
 #   <build-number>                          e.g. 293
 #   <swkit-*.sh filename>                   e.g. broken-dev-next-sw-kit-rocky-9-1.2.0-272.sh
 #   </path/to/swkit-*.sh>                   absolute or relative path
@@ -9,16 +10,25 @@
 # Jenkins build (the rest is a subversion), e.g. 2594 -> 259.
 #
 # Resolution paths:
-#   swkit-githash  -> $XDG_CACHE_HOME/swkit-githash/builds/<digits> (build-number
-#                     -> SHA is immutable, so the cache is permanent); on miss,
-#                     Artifactory storage API + range-fetch of the installer's
-#                     first 10KB (greps the embedded "revision <sha>" line);
-#                     falls back to the swkit-nightly-train Jenkins job API.
-#   swkit-date     -> swkit-githash, then bare-clone cache at
-#                     $XDG_CACHE_HOME/swkit-githash/nextutils.git, lazily
-#                     `git fetch`-ing the SHA over SSH from
-#                     git@github.com:nextsilicon/nextutils.git.
-#   swkit-info     -> both, labeled.
+#   swkit-githash       -> $XDG_CACHE_HOME/swkit-githash/builds/<digits>
+#                          (build-number -> SHA is immutable, so the cache is
+#                          permanent); on miss, Artifactory storage API +
+#                          range-fetch of the installer's first 10KB (greps the
+#                          embedded "revision <sha>" line); falls back to the
+#                          swkit-nightly-train Jenkins job API.
+#   swkit-date          -> $XDG_CACHE_HOME/swkit-githash/dates/<digits> if
+#                          present (instant). Otherwise: swkit-githash + bare-
+#                          clone cache at $XDG_CACHE_HOME/swkit-githash/
+#                          nextutils.git, lazily `git fetch`-ing the SHA over
+#                          SSH from git@github.com:nextsilicon/nextutils.git,
+#                          then writes the result to dates/<digits>.
+#   swkit-date-cached   -> reads dates/<digits> only; never touches the
+#                          network or git. Returns 1 on cache miss. Use this
+#                          from menu render paths.
+#   _swkit-resolve-one  -> background worker. Acquires a per-build advisory
+#                          lock via flock and populates dates/<digits>.
+#                          Concurrent calls for the same build are no-ops.
+#   swkit-info          -> both sha and date, labeled.
 
 _swkit-githash-digits() {
     local input="$1"
@@ -83,17 +93,30 @@ _swkit-githash-from-jenkins() {
 _swkit-date-from-sha() {
     local sha="$1"
     [[ -n "$sha" ]] || return 2
-    local cache="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/nextutils.git"
-    if [[ ! -d "$cache" ]]; then
-        mkdir -p "$(dirname "$cache")" || return 1
-        git init --bare --quiet "$cache" || return 1
+    local repo="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/nextutils.git"
+    if [[ ! -d "$repo" ]]; then
+        mkdir -p "$(dirname "$repo")" || return 1
+        git init --bare --quiet "$repo" || return 1
     fi
     local date
-    date="$(git -C "$cache" show -s --format=%cI "$sha" 2>/dev/null)"
+    date="$(git -C "$repo" show -s --format=%cI "$sha" 2>/dev/null)"
     if [[ -z "$date" ]]; then
-        git -C "$cache" fetch --quiet --no-tags --depth=1 \
-            git@github.com:nextsilicon/nextutils.git "$sha" 2>/dev/null || return 1
-        date="$(git -C "$cache" show -s --format=%cI "$sha" 2>/dev/null)"
+        # Serialize fetches — concurrent git-fetch into the same bare repo on
+        # NFS corrupts pack files (multiple workers for different build numbers
+        # would otherwise race here).
+        local fetch_lock="${repo}.fetch.lock"
+        (
+            if command -v flock &>/dev/null; then
+                flock 8 2>/dev/null || exit 1
+            fi
+            # Re-check after acquiring the lock — another worker may have
+            # already fetched this SHA.
+            if ! git -C "$repo" cat-file -e "$sha" 2>/dev/null; then
+                git -C "$repo" fetch --quiet --no-tags --depth=1 \
+                    git@github.com:nextsilicon/nextutils.git "$sha" 2>/dev/null || exit 1
+            fi
+        ) 8>"$fetch_lock" || return 1
+        date="$(git -C "$repo" show -s --format=%cI "$sha" 2>/dev/null)"
     fi
     [[ -n "$date" ]] || return 1
     printf '%s\n' "$date"
@@ -130,6 +153,16 @@ swkit-githash() {
 }
 
 swkit-date() {
+    local digits
+    digits="$(_swkit-githash-digits "$1")" || return $?
+
+    local dir="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/dates"
+    local cache="$dir/$digits"
+    if [[ -s "$cache" ]]; then
+        cat -- "$cache"
+        return 0
+    fi
+
     local sha
     sha="$(swkit-githash "$1")" || return $?
     local date
@@ -137,14 +170,60 @@ swkit-date() {
         echo "swkit-date: got SHA $sha but could not resolve commit date" >&2
         return 1
     }
+    if mkdir -p "$dir" 2>/dev/null; then
+        printf '%s\n' "$date" >"$cache.tmp" 2>/dev/null \
+            && mv -f "$cache.tmp" "$cache" 2>/dev/null
+    fi
     printf '%s\n' "$date"
 }
+
+# Read-only cache lookup. Never touches the network or git. Echoes the cached
+# ISO date if dates/<digits> exists, returns 1 otherwise. Safe to call from
+# tight loops (e.g. menu rendering).
+swkit-date-cached() {
+    local digits
+    digits="$(_swkit-githash-digits "$1")" || return $?
+    local cache="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/dates/$digits"
+    [[ -s "$cache" ]] || return 1
+    cat -- "$cache"
+}
+
+# Background worker: resolve the date for a single build and write the cache.
+# Held by a per-build flock so concurrent installer launches don't double-up on
+# the same build. Silent on lock contention or failure.
+_swkit-resolve-one() {
+    local digits
+    digits="$(_swkit-githash-digits "$1")" || return $?
+
+    local dir="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/dates"
+    mkdir -p "$dir" 2>/dev/null || return 1
+    local cache="$dir/$digits"
+    [[ -s "$cache" ]] && return 0
+
+    local lock="$dir/$digits.lock"
+    exec 9>"$lock" 2>/dev/null || return 1
+    if command -v flock &>/dev/null; then
+        flock -n 9 2>/dev/null || { exec 9>&-; return 0; }
+    fi
+
+    # Re-check inside the lock — another worker may have just finished.
+    if [[ -s "$cache" ]]; then
+        exec 9>&-
+        return 0
+    fi
+
+    swkit-date "$1" >/dev/null 2>&1
+    local rc=$?
+    exec 9>&-
+    return $rc
+}
+
 
 swkit-info() {
     local sha
     sha="$(swkit-githash "$1")" || return $?
     local date
-    if ! date="$(_swkit-date-from-sha "$sha")"; then
+    if ! date="$(swkit-date "$1" 2>/dev/null)"; then
         printf 'sha:  %s\n' "$sha"
         echo "swkit-info: got SHA $sha but could not resolve commit date" >&2
         return 1

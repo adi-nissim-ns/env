@@ -22,9 +22,10 @@ BASHRC="${HOME}/.bashrc.${USER}"
 # Optional: export ARTIFACTORY_API_KEY for authenticated access
 API_KEY="${ARTIFACTORY_API_KEY:-}"
 
-# Source swkit-githash / swkit-date helpers so _best_file can rank installers
-# by commit date instead of the embedded build number — build numbers across
-# channels and forks (244 vs 2621) don't reliably reflect chronology.
+# Source the swkit-githash helpers so the menu can decorate labels with cached
+# commit dates and spawn background workers to populate the cache on first
+# launch. Optional — the installer still runs end-to-end without them, just
+# without dates.
 GITHASH_HELPERS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.bashrc.swkit-githash"
 if [[ -f "$GITHASH_HELPERS" ]]; then
     # shellcheck source=/dev/null
@@ -41,6 +42,43 @@ else
     YELLOW=""; GREEN=""; RED=""; NC=""
 fi
 
+# ── Menu history — adaptive defaults ──────────────────────────────────────────
+# Tracks user selections per menu. When the last 3 consecutive picks are the
+# same non-default value, that value becomes the new default for that menu.
+# Stored in ~/.config/swkit/ (home dir — shared across dev environments).
+SWKIT_CONFIG_DIR="${HOME}/.config/swkit"
+
+_log_menu_choice() {
+    local menu="$1" choice="$2"
+    mkdir -p "$SWKIT_CONFIG_DIR" 2>/dev/null
+    echo "$choice" >> "${SWKIT_CONFIG_DIR}/${menu}.history"
+}
+
+_get_menu_default() {
+    local menu="$1" fallback="$2"
+    local hfile="${SWKIT_CONFIG_DIR}/${menu}.history"
+    [[ -f "$hfile" ]] || { echo "$fallback"; return; }
+    local -a last3=()
+    while IFS= read -r line; do
+        last3+=("$line")
+    done < <(tail -3 "$hfile" 2>/dev/null)
+    (( ${#last3[@]} < 3 )) && { echo "$fallback"; return; }
+    if [[ "${last3[0]}" == "${last3[1]}" && "${last3[1]}" == "${last3[2]}" ]]; then
+        echo "${last3[0]}"
+    else
+        echo "$fallback"
+    fi
+}
+
+_clear_local_data() {
+    echo "  Clearing all local swkit data..."
+    rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash" 2>/dev/null
+    rm -rf "${SWKIT_CONFIG_DIR}" 2>/dev/null
+    echo "  Removed: ~/.cache/swkit-githash/ (listings, dates, locks)"
+    echo "  Removed: ~/.config/swkit/ (menu history)"
+    echo "  Done."
+}
+
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 _curl() {
     local -a args=(-sf)
@@ -48,11 +86,61 @@ _curl() {
     curl "${args[@]}" "$@"
 }
 
+# Disk-cached fetch with TTL. Listings change rarely on the user's timescale
+# and the menu issues several of them, so caching makes repeat launches
+# instant and lets us pre-warm in parallel on a cold cache.
+LISTINGS_TTL="${SWKIT_LISTINGS_TTL:-600}"
+LISTINGS_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/listings"
+
+_curl_cached() {
+    local key="$1" url="$2"
+    local cache="${LISTINGS_DIR}/${key}"
+    if [[ -s "$cache" ]]; then
+        local now mtime
+        now=$(date +%s 2>/dev/null) || now=0
+        mtime=$(stat -c %Y "$cache" 2>/dev/null) || mtime=0
+        if (( now - mtime < LISTINGS_TTL )); then
+            cat -- "$cache"
+            return 0
+        fi
+    fi
+    local content
+    content=$(_curl "$url") || return 1
+    mkdir -p "$LISTINGS_DIR" 2>/dev/null
+    printf '%s' "$content" >"${cache}.tmp.$$" 2>/dev/null \
+        && mv -f "${cache}.tmp.$$" "$cache" 2>/dev/null
+    printf '%s' "$content"
+}
+
+# Cache-only read — never touches the network. Returns 1 on miss. Used by the
+# main menu so it never blocks; a detached __refresh worker is responsible
+# for keeping the cache populated.
+_curl_cache_only() {
+    local key="$1"
+    local cache="${LISTINGS_DIR}/${key}"
+    [[ -s "$cache" ]] || return 1
+    cat -- "$cache"
+}
+
 # Extract build number from filename (the trailing -NNNN before .sh)
 # stable-next-sw-kit-rocky-9-1.2.0-244.sh  →  244
 # ns-sw-kit-rocky-9-1.2.0-2621.sh          →  2621
 _build_num() {
     echo "$1" | sed 's/\.sh$//' | rev | cut -d'-' -f1 | rev
+}
+
+# Heuristic build ordering: trailing number truncated to its first 3 digits.
+# Suffixes >3 digits are "buildNNN" + "subversion" (e.g. 2621 -> Jenkins build
+# 262 with subversion 1) and the per-fork subversion is not chronological, so
+# we rank by the Jenkins build prefix only.
+# stable-...-244.sh    → 244
+# ns-sw-kit-...-2621.sh → 262
+_build_num_heuristic() {
+    local b
+    b=$(_build_num "$1")
+    [[ "$b" =~ ^[0-9]+$ ]] || { echo ""; return 1; }
+    (( ${#b} > 3 )) && b="${b:0:3}"
+    printf '%s\n' "$b"
 }
 
 # Map filename prefix to quality label
@@ -84,10 +172,17 @@ _quality_rank() {
 # List version subdirectories for channel/OS; one per line, sorted ascending.
 # The Artifactory response is pretty-printed JSON, so we flatten to one line first.
 _list_versions() {
+    local cache_only=0
+    [[ "${1:-}" == "--cache-only" ]] && { cache_only=1; shift; }
     local channel="$1"
     local url="${ARTIFACTORY_HOST}/artifactory/api/storage/${REPO}/${BASE_PATH}/${channel}/${OS_KEY}"
+    local key="versions_${channel}_${OS_KEY}"
     local resp
-    resp=$(_curl "$url" 2>/dev/null) || return 1
+    if (( cache_only )); then
+        resp=$(_curl_cache_only "$key" 2>/dev/null) || return 1
+    else
+        resp=$(_curl_cached "$key" "$url" 2>/dev/null) || return 1
+    fi
     echo "$resp" \
         | tr '\n' ' ' \
         | tr '}' '\n' \
@@ -101,10 +196,17 @@ _list_versions() {
 # List usable installer files in channel/OS/version; one per line.
 # Excludes: do-not-use-* and *-remove.sh
 _list_files() {
+    local cache_only=0
+    [[ "${1:-}" == "--cache-only" ]] && { cache_only=1; shift; }
     local channel="$1" version="$2"
     local url="${ARTIFACTORY_HOST}/artifactory/api/storage/${REPO}/${BASE_PATH}/${channel}/${OS_KEY}/${version}"
+    local key="files_${channel}_${OS_KEY}_${version}"
     local resp
-    resp=$(_curl "$url" 2>/dev/null) || return 1
+    if (( cache_only )); then
+        resp=$(_curl_cache_only "$key" 2>/dev/null) || return 1
+    else
+        resp=$(_curl_cached "$key" "$url" 2>/dev/null) || return 1
+    fi
     echo "$resp" \
         | tr '\n' ' ' \
         | tr '}' '\n' \
@@ -115,52 +217,179 @@ _list_files() {
         | grep -Ev '(^do-not-use-|-remove\.sh$)'
 }
 
-# Read from stdin: return the newest file by commit date (via swkit-date, when
-# available); falls back to highest build number when the date can't be
-# resolved. If quality_filter is given, only consider files of that quality.
+# Read from stdin: return the file with the highest build-number heuristic
+# (first 3 digits of the trailing -NNNN suffix). Pure bash — no forks per
+# line, so it stays fast even with hundreds of candidates.
 _best_file() {
     local quality_filter="${1:-}"
-    local -a candidates=()
-    local fname q
+    local best="" best_h=-1
+    local fname q h
     while IFS= read -r fname; do
         [[ -z "$fname" ]] && continue
         if [[ -n "$quality_filter" ]]; then
-            q=$(_quality "$fname")
+            case "$fname" in
+                do-not-use-*)   q="do-not-use" ;;
+                *-remove.sh)    q="remove"     ;;
+                stable-*)       q="stable"     ;;
+                verified-*)     q="verified"   ;;
+                ns-sw-kit-*)    q="latest"     ;;
+                untested-*)     q="untested"   ;;
+                unstable-*)     q="unstable"   ;;
+                *)              q="unknown"    ;;
+            esac
             [[ "$q" != "$quality_filter" ]] && continue
         fi
-        candidates+=("$fname")
-    done
-
-    [[ ${#candidates[@]} -eq 0 ]] && return 0
-
-    if command -v swkit-date &>/dev/null; then
-        local best_fname="" best_date="" d
-        for fname in "${candidates[@]}"; do
-            d=$(swkit-date "$fname" 2>/dev/null) || d=""
-            [[ -z "$d" ]] && continue
-            if [[ -z "$best_date" || "$d" > "$best_date" ]]; then
-                best_date="$d"
-                best_fname="$fname"
-            fi
-        done
-        [[ -n "$best_fname" ]] && { echo "$best_fname"; return 0; }
-    fi
-
-    local best="" best_build=-1 b
-    for fname in "${candidates[@]}"; do
-        b=$(_build_num "$fname")
-        [[ "$b" =~ ^[0-9]+$ ]] || continue
-        (( b > best_build )) && { best_build=$b; best="$fname"; }
+        h="${fname%.sh}"
+        h="${h##*-}"
+        [[ "$h" =~ ^[0-9]+$ ]] || continue
+        (( ${#h} > 3 )) && h="${h:0:3}"
+        if (( 10#$h > best_h )); then
+            best_h=$((10#$h))
+            best="$fname"
+        fi
     done
     [[ -n "$best" ]] && echo "$best"
     return 0
 }
 
+# Cached date lookup — returns the cached ISO date (or empty string). Never
+# blocks. Used for label decoration in the menu and confirmation prompts.
+_cached_date() {
+    command -v swkit-date-cached &>/dev/null || { echo ""; return 0; }
+    swkit-date-cached "$1" 2>/dev/null || echo ""
+}
+
+# Compose a label like "<filename>" or "<filename>, <YYYY-MM-DD>" depending on
+# whether the date is already in the local cache.
+_label_with_date() {
+    local fname="$1" d
+    [[ -z "$fname" ]] && { echo ""; return 0; }
+    d=$(_cached_date "$fname")
+    if [[ -n "$d" ]]; then
+        printf '%s, %s\n' "$fname" "${d%%T*}"
+    else
+        printf '%s\n' "$fname"
+    fi
+}
+
+# Pre-warm Artifactory listings in parallel. Two rounds: first the latest.txt
+# + version listings; then file listings for the newest version per channel.
+# Used by the detached __refresh worker — NOT by the foreground menu, which
+# reads strictly from the local cache so it never blocks on the network.
+_warm_listings() {
+    (
+        _read_latest_txt >/dev/null 2>&1 &
+        _list_versions release >/dev/null 2>&1 &
+        _list_versions rc >/dev/null 2>&1 &
+        wait
+    )
+
+    local rel_ver rc_ver
+    rel_ver=$(_list_versions release 2>/dev/null | tail -1)
+    rc_ver=$(_list_versions rc 2>/dev/null | tail -1)
+
+    (
+        [[ -n "$rel_ver" ]] && _list_files release "$rel_ver" >/dev/null 2>&1 &
+        [[ -n "$rc_ver"  ]] && _list_files rc      "$rc_ver"  >/dev/null 2>&1 &
+        wait
+    )
+}
+
+# Detached refresh worker. Warms the listings cache for the next launch and
+# spawns per-build date workers for anything newly surfaced. Held by a single
+# flock so a flurry of installer launches collapses to one refresher process.
+# Invoked via `bash <this-script> __refresh` from _spawn_refresh.
+_run_refresh() {
+    local lock_dir="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash"
+    mkdir -p "$lock_dir" 2>/dev/null
+    local lock="${lock_dir}/refresh.lock"
+    exec 9>"$lock" 2>/dev/null || return 0
+    if command -v flock &>/dev/null; then
+        flock -n 9 2>/dev/null || return 0
+    fi
+
+    _warm_listings
+
+    # Resolve dates ONLY for the three files the menu will show — not every
+    # build in the version dir. A version dir often has 30–80 builds; sending
+    # an ssh git-fetch for each would flood GitHub and dominate CPU on every
+    # launch.
+    local _ver _files cand
+    local -a menu_files=()
+    _ver=$(_list_versions release 2>/dev/null | tail -1)
+    if [[ -n "$_ver" ]]; then
+        _files=$(_list_files release "$_ver" 2>/dev/null)
+        cand=$(echo "$_files" | _best_file "stable")
+        [[ -z "$cand" ]] && cand=$(echo "$_files" | _best_file "")
+        [[ -n "$cand" ]] && menu_files+=("$cand")
+    fi
+    _ver=$(_list_versions rc 2>/dev/null | tail -1)
+    if [[ -n "$_ver" ]]; then
+        _files=$(_list_files rc "$_ver" 2>/dev/null)
+        cand=$(echo "$_files" | _best_file "stable")
+        [[ -n "$cand" ]] && menu_files+=("$cand")
+        cand=$(echo "$_files" | _best_file "")
+        [[ -n "$cand" ]] && menu_files+=("$cand")
+    fi
+    (( ${#menu_files[@]} > 0 )) && _spawn_date_workers "${menu_files[@]}"
+}
+
+# Spawn _run_refresh in a fully-detached session so it survives the installer
+# exiting. No-ops silently if anything goes wrong — the menu never depends on
+# the refresher having succeeded.
+_spawn_refresh() {
+    local self_dir self_path
+    self_dir="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || return 0
+    self_path="${self_dir}/$(basename -- "${BASH_SOURCE[0]}")"
+    [[ -f "$self_path" ]] || return 0
+    (
+        setsid bash "$self_path" __refresh </dev/null >/dev/null 2>&1 &
+    ) 2>/dev/null
+}
+
+# Spawn one detached background worker per file with no cached date. Each
+# worker takes a per-build flock via _swkit-resolve-one, so concurrent
+# installer launches don't double-up on the same build — the loser exits
+# silently without a network round-trip.
+_spawn_date_workers() {
+    command -v _swkit-resolve-one &>/dev/null || return 0
+    [[ -f "${GITHASH_HELPERS:-}" ]] || return 0
+
+    local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/dates"
+    local fname digits cache
+    declare -A _seen=()
+
+    for fname in "$@"; do
+        [[ -z "$fname" ]] && continue
+        digits=$(_swkit-githash-digits "$fname" 2>/dev/null) || continue
+        # Dedup within this launch — many files may share Jenkins build digits.
+        [[ -n "${_seen[$digits]:-}" ]] && continue
+        _seen[$digits]=1
+        cache="${cache_dir}/${digits}"
+        [[ -s "$cache" ]] && continue
+
+        # Fully-detached worker. setsid puts it in a new session so it
+        # survives the installer exiting. flock -n inside the worker is the
+        # gate against duplicates from concurrent launches.
+        (
+            setsid bash -c "source '${GITHASH_HELPERS}' >/dev/null 2>&1; _swkit-resolve-one '${digits}' >/dev/null 2>&1" \
+                </dev/null >/dev/null 2>&1 &
+        ) 2>/dev/null
+    done
+}
+
 # Parse latest.txt from release channel; echo "version|filename" if valid
 _read_latest_txt() {
+    local cache_only=0
+    [[ "${1:-}" == "--cache-only" ]] && { cache_only=1; shift; }
     local url="${ARTIFACTORY_HOST}/artifactory/${REPO}/${BASE_PATH}/release/${OS_KEY}/latest.txt"
+    local key="latest_txt_${OS_KEY}"
     local content
-    content=$(_curl "$url" 2>/dev/null) || return 1
+    if (( cache_only )); then
+        content=$(_curl_cache_only "$key" 2>/dev/null) || return 1
+    else
+        content=$(_curl_cached "$key" "$url" 2>/dev/null) || return 1
+    fi
     local path_part
     path_part=$(echo "$content" | grep -o "release/${OS_KEY}/[^[:space:]]*" | head -1)
     [[ -z "$path_part" ]] && return 1
@@ -298,32 +527,29 @@ _install() {
     echo ""
 
     # Ask all options up front before any downloading
-    local lib_ans lib_arg="--no-nextsilicon-libs"
+    local lib_arg="--no-nextsilicon-libs"
     echo "  swkit includes two compute libraries: nextfft and nextblas (C++ with C"
     echo "  and Fortran interfaces). If you are developing a custom build of either"
     echo "  library, skip this — swkit's copies may conflict with your local build."
     echo "  For all other users, installing the libraries is recommended."
-    read -rp "${GREEN}  Install NextSilicon libraries? [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" lib_ans
-    [[ "$lib_ans" =~ ^[Yy]$ ]] && lib_arg=""
+    _prompt_yn "install_libs" "  Install NextSilicon libraries?" "n" && lib_arg=""
 
-    local clear_ans clear_opt=1
+    local clear_opt=1
     echo ""
     echo "  Clearing removes existing swkit packages, DKMS modules, and /opt/nextsilicon"
     echo "  before the fresh install. Recommended when downgrading swkit (old files may"
     echo "  otherwise linger) or when switching from a with-libraries to a"
     echo "  without-libraries install. Safe to skip only on a first-time install."
-    read -rp "${GREEN}  Clear /opt/nextsilicon before install? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" clear_ans
-    [[ "$clear_ans" =~ ^[Nn]$ ]] && clear_opt=0
+    _prompt_yn "install_clear" "  Clear /opt/nextsilicon before install?" "y" || clear_opt=0
 
-    local bashrc_ans update_bashrc=0
+    local update_bashrc=0
     echo ""
     echo "  swkit always installs into /opt/nextsilicon. If you maintain a custom-built"
     echo "  nextutils stack, your NEXT_HOME may currently point to that location instead."
     echo "  Choosing Y updates your ~/.bashrc.USER to source swkit's environment and"
     echo "  exports NEXT_HOME immediately so the change takes effect in the current shell."
     echo "  Choose N to keep using your custom build."
-    read -rp "${GREEN}  Update ${BASHRC} to activate swkit? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" bashrc_ans
-    [[ "$bashrc_ans" =~ ^[Nn]$ ]] || update_bashrc=1
+    _prompt_yn "install_bashrc" "  Update ${BASHRC} to activate swkit?" "y" && update_bashrc=1
     echo ""
 
     local dl_url="${ARTIFACTORY_HOST}/artifactory/${REPO}/${BASE_PATH}/${channel}/${OS_KEY}/${version}/${filename}"
@@ -365,14 +591,37 @@ _install() {
 }
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
-_confirm() {
+_prompt_yn() {
+    local menu="$1" prompt_text="$2" hardcoded_default="$3"
+    local default
+    default=$(_get_menu_default "$menu" "$hardcoded_default")
     local ans
-    read -rp "${GREEN}$1 [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" ans
+    if [[ "$default" == "y" ]]; then
+        read -rp "${GREEN}${prompt_text} [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" ans
+        ans="${ans:-y}"
+    else
+        read -rp "${GREEN}${prompt_text} [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" ans
+        ans="${ans:-n}"
+    fi
+    local norm
+    norm=$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')
+    norm="${norm:0:1}"
+    _log_menu_choice "$menu" "$norm"
     [[ "$ans" =~ ^[Yy]$ ]]
 }
 
+_find_index_of() {
+    local value="$1"; shift
+    local arr=("$@")
+    local i
+    for i in "${!arr[@]}"; do
+        [[ "${arr[$i]}" == "$value" ]] && { echo "$((i + 1))"; return 0; }
+    done
+    return 1
+}
+
 _offer_clear() {
-    if _confirm "  Clear existing swkit installation?"; then
+    if _prompt_yn "offer_clear" "  Clear existing swkit installation?" "n"; then
         _clear_swkit
     fi
 }
@@ -390,8 +639,8 @@ _flow_stable() {
         filename="${latest_info##*|}"
         files=$(_list_files "release" "$version" 2>/dev/null) || files=""
         if echo "$files" | grep -qxF "$filename"; then
-            echo "  Latest stable (latest.txt): release/${version}/${filename}"
-            if _confirm "Install?"; then
+            echo "  Latest stable (latest.txt): release/${version}/$(_label_with_date "$filename")"
+            if _prompt_yn "confirm_install" "Install?" "n"; then
                 _install "release" "$version" "$filename"
             else
                 _offer_clear
@@ -401,7 +650,7 @@ _flow_stable() {
         echo "  (latest.txt target not found — scanning release channel)"
     fi
 
-    # Fallback: highest-build stable-* (or any file) in latest release version
+    # Fallback: highest-heuristic stable-* (or any file) in latest release version
     version=$(_list_versions "release" | tail -1) \
         || { echo "  No versions found in release channel."; return 1; }
     [[ -z "$version" ]] && { echo "  No versions found in release channel."; return 1; }
@@ -413,8 +662,8 @@ _flow_stable() {
     [[ -z "$filename" ]] && filename=$(echo "$files" | _best_file "")
     [[ -z "$filename" ]] && { echo "  No kit found in release/${version}."; return 1; }
 
-    echo "  Found: release/${version}/${filename}"
-    if _confirm "Install?"; then
+    echo "  Found: release/${version}/$(_label_with_date "$filename")"
+    if _prompt_yn "confirm_install" "Install?" "n"; then
         _install "release" "$version" "$filename"
     else
         _offer_clear
@@ -433,8 +682,8 @@ _flow_stable_rc() {
     filename=$(echo "$files" | _best_file "stable")
     [[ -z "$filename" ]] && { echo "  No stable RC kit found in rc/${ver}."; return 1; }
 
-    echo "  Found: rc/${ver}/${filename}"
-    if _confirm "Install?"; then
+    echo "  Found: rc/${ver}/$(_label_with_date "$filename")"
+    if _prompt_yn "confirm_install" "Install?" "n"; then
         _install "rc" "$ver" "$filename"
     else
         _offer_clear
@@ -442,8 +691,9 @@ _flow_stable_rc() {
 }
 
 # ── Flow 3: install latest kit ─────────────────────────────────────────────────
-# Picks the chronologically newest file (by commit date, via swkit-date) in the
-# latest rc version, regardless of quality prefix. Falls back to release.
+# Picks the file with the highest build-number heuristic (first 3 digits of the
+# trailing -NNNN suffix) in the latest rc version, regardless of quality
+# prefix. Falls back to release if rc is empty.
 _flow_latest() {
     local channel ver files filename
 
@@ -459,8 +709,8 @@ _flow_latest() {
     done
 
     [[ -z "$filename" ]] && { echo "  No kits found."; return 1; }
-    echo "  Found: ${channel}/${ver}/${filename}"
-    if _confirm "Install?"; then
+    echo "  Found: ${channel}/${ver}/$(_label_with_date "$filename")"
+    if _prompt_yn "confirm_install" "Install?" "n"; then
         _install "$channel" "$ver" "$filename"
     else
         _offer_clear
@@ -469,8 +719,14 @@ _flow_latest() {
 
 # ── Flow 3: list versions → pick version → list files → pick file → install ───
 _flow_select() {
-    # Step 1 — pick a version
+    # Step 1 — pick a version. Warm both channel listings in parallel; the
+    # foreground calls below then hit the disk cache.
     echo "Fetching available versions..."
+    (
+        _list_versions release >/dev/null 2>&1 &
+        _list_versions rc      >/dev/null 2>&1 &
+        wait
+    )
 
     local -a V_CHANNELS=() V_VERSIONS=()
     local channel ver
@@ -487,17 +743,34 @@ _flow_select() {
         return 1
     fi
 
+    # Build combined labels for history lookup
+    local -a V_LABELS=()
+    for i in "${!V_VERSIONS[@]}"; do
+        V_LABELS+=("${V_CHANNELS[$i]}/${V_VERSIONS[$i]}")
+    done
+
+    local default_vsel="1"
+    local prev_ver
+    prev_ver=$(_get_menu_default "select_version" "")
+    if [[ -n "$prev_ver" ]]; then
+        local found_idx
+        found_idx=$(_find_index_of "$prev_ver" "${V_LABELS[@]}") && default_vsel="$found_idx"
+    fi
+
     echo ""
     printf "  %-4s  %-9s  %s\n"  "#"    "Channel"   "Version"
     printf "  %-4s  %-9s  %s\n"  "----" "---------" "-------"
     local i
     for i in "${!V_VERSIONS[@]}"; do
-        printf "  %-4s  %-9s  %s\n" "$((i+1))" "${V_CHANNELS[$i]}" "${V_VERSIONS[$i]}"
+        local marker=""
+        [[ "$((i+1))" == "$default_vsel" ]] && marker=" [default]"
+        printf "  %-4s  %-9s  %s%s\n" "$((i+1))" "${V_CHANNELS[$i]}" "${V_VERSIONS[$i]}" "$marker"
     done
     echo ""
 
     local vsel
-    read -rp "${GREEN}Select version (0 to cancel): ${NC}" vsel
+    read -rp "${GREEN}Select version (0 to cancel) [${default_vsel}]: ${NC}" vsel
+    vsel="${vsel:-$default_vsel}"
     [[ "$vsel" == "0" ]] && { echo "Cancelled."; return 0; }
     if ! [[ "$vsel" =~ ^[0-9]+$ ]] || [[ "$vsel" -lt 1 ]] || [[ "$vsel" -gt "${#V_VERSIONS[@]}" ]]; then
         echo "Invalid selection."
@@ -507,6 +780,7 @@ _flow_select() {
     local vidx=$(( vsel - 1 ))
     local sel_channel="${V_CHANNELS[$vidx]}"
     local sel_version="${V_VERSIONS[$vidx]}"
+    _log_menu_choice "select_version" "${sel_channel}/${sel_version}"
 
     # Step 2 — pick a file
     echo ""
@@ -517,40 +791,86 @@ _flow_select() {
         || { echo "Could not list files."; return 1; }
     [[ -z "$files" ]] && { echo "No kits found."; return 1; }
 
-    # Sort by quality rank (asc) then build number (desc)
-    local sorted_files
-    sorted_files=$(
-        while IFS= read -r fname; do
-            [[ -z "$fname" ]] && continue
-            local q b rank
-            q=$(_quality "$fname")
-            b=$(_build_num "$fname")
-            [[ "$b" =~ ^[0-9]+$ ]] || b=0
-            rank=$(_quality_rank "$q")
-            printf '%d %08d %s\n' "$rank" "$(( 99999999 - b ))" "$fname"
-        done <<< "$files" \
-        | sort -k1,1n -k2,2n \
-        | awk '{print $3}'
-    )
+    # Classify, sort, and emit (quality, build, filename) lines in a single
+    # awk → sort → cut pipeline. Avoids ~5 subshell forks per file that the
+    # previous _quality / _build_num / _quality_rank loop incurred.
+    local sorted_rows
+    sorted_rows=$(echo "$files" | awk -F'\n' '
+        function quality(fn) {
+            if (fn ~ /^do-not-use-/) return "do-not-use"
+            if (fn ~ /-remove\.sh$/)  return "remove"
+            if (fn ~ /^stable-/)      return "stable"
+            if (fn ~ /^verified-/)    return "verified"
+            if (fn ~ /^ns-sw-kit-/)   return "latest"
+            if (fn ~ /^untested-/)    return "untested"
+            if (fn ~ /^unstable-/)    return "unstable"
+            return "unknown"
+        }
+        function qrank(q) {
+            if (q == "stable")   return 1
+            if (q == "verified") return 2
+            if (q == "latest")   return 3
+            if (q == "untested") return 4
+            if (q == "unstable") return 5
+            return 9
+        }
+        {
+            fn = $0
+            if (fn == "") next
+            n = fn; sub(/\.sh$/, "", n); sub(/.*-/, "", n)
+            if (n !~ /^[0-9]+$/) n = 0
+            q = quality(fn)
+            printf "%d\t%08d\t%s\t%s\t%s\n", qrank(q), 99999999 - n, q, n, fn
+        }
+    ' | sort -t$'\t' -k1,1n -k2,2n | cut -f3-)
+
+    # Pull each row into parallel arrays, decorating with cached date (read
+    # directly from the dates cache without forking).
+    local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/dates"
+    local -a F_FILES=() F_QUALITIES=() F_BUILDS=() F_DATES=()
+    local q b fname digits cache_file d
+    while IFS=$'\t' read -r q b fname; do
+        [[ -z "$fname" ]] && continue
+        F_FILES+=("$fname")
+        F_QUALITIES+=("$q")
+        F_BUILDS+=("$b")
+        digits="$b"
+        (( ${#digits} > 3 )) && digits="${digits:0:3}"
+        cache_file="${cache_dir}/${digits}"
+        if [[ -s "$cache_file" ]]; then
+            d=$(<"$cache_file")
+            F_DATES+=("${d%%T*}")
+        else
+            F_DATES+=("")
+        fi
+    done <<< "$sorted_rows"
+
+    # Kick off background workers for any files whose dates aren't cached —
+    # next launch will show them inline.
+    _spawn_date_workers "${F_FILES[@]}"
+
+    local default_fsel="1"
+    local prev_kit
+    prev_kit=$(_get_menu_default "select_kit" "")
+    if [[ -n "$prev_kit" ]]; then
+        local found_idx
+        found_idx=$(_find_index_of "$prev_kit" "${F_FILES[@]}") && default_fsel="$found_idx"
+    fi
 
     echo ""
-    printf "  %-4s  %-10s  %-7s  %s\n"  "#"    "Quality"    "Build"   "File"
-    printf "  %-4s  %-10s  %-7s  %s\n"  "----" "----------" "-------" "----"
-
-    local -a F_FILES=()
-    local n=1 fname q b
-    while IFS= read -r fname; do
-        [[ -z "$fname" ]] && continue
-        q=$(_quality "$fname")
-        b=$(_build_num "$fname")
-        printf "  %-4s  %-10s  %-7s  %s\n" "$n" "$q" "$b" "$fname"
-        F_FILES+=("$fname")
-        n=$(( n + 1 ))
-    done <<< "$sorted_files"
+    printf "  %-4s  %-10s  %-7s  %-12s  %s\n"  "#"    "Quality"    "Build"   "Date"         "File"
+    printf "  %-4s  %-10s  %-7s  %-12s  %s\n"  "----" "----------" "-------" "------------" "----"
+    for i in "${!F_FILES[@]}"; do
+        local marker=""
+        [[ "$((i+1))" == "$default_fsel" ]] && marker="  [default]"
+        printf "  %-4s  %-10s  %-7s  %-12s  %s%s\n" \
+            "$((i+1))" "${F_QUALITIES[$i]}" "${F_BUILDS[$i]}" "${F_DATES[$i]}" "${F_FILES[$i]}" "$marker"
+    done
     echo ""
 
     local fsel
-    read -rp "${GREEN}Select kit (0 to cancel): ${NC}" fsel
+    read -rp "${GREEN}Select kit (0 to cancel) [${default_fsel}]: ${NC}" fsel
+    fsel="${fsel:-$default_fsel}"
     [[ "$fsel" == "0" ]] && { echo "Cancelled."; return 0; }
     if ! [[ "$fsel" =~ ^[0-9]+$ ]] || [[ "$fsel" -lt 1 ]] || [[ "$fsel" -gt "${#F_FILES[@]}" ]]; then
         echo "Invalid selection."
@@ -558,7 +878,8 @@ _flow_select() {
     fi
 
     local selected="${F_FILES[$(( fsel - 1 ))]}"
-    if _confirm "Install ${sel_channel}/${sel_version}/${selected}?"; then
+    _log_menu_choice "select_kit" "$selected"
+    if _prompt_yn "confirm_install" "Install ${sel_channel}/${sel_version}/${selected}?" "n"; then
         _install "$sel_channel" "$sel_version" "$selected"
     else
         _offer_clear
@@ -567,7 +888,7 @@ _flow_select() {
 
 # ── Flow 5: clear only ────────────────────────────────────────────────────────
 _flow_clear() {
-    if _confirm "Clear existing swkit installation?"; then
+    if _prompt_yn "confirm_clear" "Clear existing swkit installation?" "n"; then
         _clear_swkit
     else
         echo "Cancelled."
@@ -576,33 +897,93 @@ _flow_clear() {
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 main() {
+    # Detached refresh worker dispatch — fully off the user's critical path.
+    if [[ "${1:-}" == "__refresh" ]]; then
+        _run_refresh
+        return 0
+    fi
+
+    # Spawn the detached refresher up front. It populates the listings cache
+    # (and per-build date cache) for the *next* launch. We never block on it.
+    _spawn_refresh
+
     echo "==========================================="
     echo "  NextSilicon swkit Installer"
     echo "  OS detected: ${OS_KEY}"
     echo "==========================================="
     echo ""
 
-    echo "${GREEN}  1) Install last stable kit  [default]${NC}"
-    echo "${GREEN}  2) Install last stable RC${NC}"
-    echo "${GREEN}  3) Install last kit${NC}"
-    echo "${GREEN}  4) List available kits and select${NC}"
-    echo "${GREEN}  5) Clear swkit${NC}"
-    echo "${GREEN}  6) Exit${NC}"
+    # Resolve labels from cached listings when available, falling back to a
+    # live fetch on a cold cache so the menu always shows filenames.
+    local stable_label="" stable_rc_label="" latest_label=""
+    local _ver _files _fname _info _ch
+
+    # Option 1: latest stable.
+    if _info=$(_read_latest_txt 2>/dev/null) && [[ -n "$_info" ]]; then
+        _ver="${_info%%|*}"
+        _fname="${_info##*|}"
+        _files=$(_list_files "release" "$_ver" 2>/dev/null) || _files=""
+        echo "$_files" | grep -qxF "$_fname" && stable_label="$_fname"
+    fi
+    if [[ -z "$stable_label" ]]; then
+        _ver=$(_list_versions "release" 2>/dev/null | tail -1)
+        if [[ -n "$_ver" ]]; then
+            _files=$(_list_files "release" "$_ver" 2>/dev/null) || _files=""
+            stable_label=$(echo "$_files" | _best_file "stable")
+            [[ -z "$stable_label" ]] && stable_label=$(echo "$_files" | _best_file "")
+        fi
+    fi
+
+    # Option 2: latest stable RC.
+    _ver=$(_list_versions "rc" 2>/dev/null | tail -1)
+    if [[ -n "$_ver" ]]; then
+        _files=$(_list_files "rc" "$_ver" 2>/dev/null) || _files=""
+        stable_rc_label=$(echo "$_files" | _best_file "stable")
+    fi
+
+    # Option 3: latest kit — rc first, fall back to release.
+    for _ch in "rc" "release"; do
+        _ver=$(_list_versions "$_ch" 2>/dev/null | tail -1)
+        [[ -z "$_ver" ]] && continue
+        _files=$(_list_files "$_ch" "$_ver" 2>/dev/null) || continue
+        latest_label=$(echo "$_files" | _best_file "")
+        [[ -n "$latest_label" ]] && break
+    done
+
+    # Compose labels with cached dates where available.
+    local s1="last stable kit" s2="last stable RC" s3="last kit"
+    [[ -n "$stable_label" ]]    && s1="last stable kit  ($(_label_with_date "$stable_label"))"
+    [[ -n "$stable_rc_label" ]] && s2="last stable RC   ($(_label_with_date "$stable_rc_label"))"
+    [[ -n "$latest_label" ]]    && s3="last kit         ($(_label_with_date "$latest_label"))"
+
+    local default_choice
+    default_choice=$(_get_menu_default "main" "1")
+    local -a _d=("" "" "" "" "" "" "")
+    _d[$((default_choice - 1))]="  [default]"
+
+    echo "${GREEN}  1) Install ${s1}${_d[0]}${NC}"
+    echo "${GREEN}  2) Install ${s2}${_d[1]}${NC}"
+    echo "${GREEN}  3) Install ${s3}${_d[2]}${NC}"
+    echo "${GREEN}  4) List available kits and select${_d[3]}${NC}"
+    echo "${GREEN}  5) Clear swkit${_d[4]}${NC}"
+    echo "${GREEN}  6) Clear all local data (cache + history)${_d[5]}${NC}"
+    echo "${GREEN}  7) Exit${_d[6]}${NC}"
     echo ""
 
     local choice
-    read -rp "${GREEN}Enter choice [${GREEN}1${GREEN}]: ${NC}" choice
-    choice="${choice:-1}"
+    read -rp "${GREEN}Enter choice [${GREEN}${default_choice}${GREEN}]: ${NC}" choice
+    choice="${choice:-$default_choice}"
     echo ""
 
     case "$choice" in
-        1) _flow_stable     ;;
-        2) _flow_stable_rc  ;;
-        3) _flow_latest     ;;
-        4) _flow_select     ;;
-        5) _flow_clear      ;;
-        6) echo "Bye."      ;;
-        *) echo "Invalid choice: '${choice}'"; exit 1 ;;
+        1) _log_menu_choice "main" "1"; _flow_stable      ;;
+        2) _log_menu_choice "main" "2"; _flow_stable_rc   ;;
+        3) _log_menu_choice "main" "3"; _flow_latest      ;;
+        4) _log_menu_choice "main" "4"; _flow_select      ;;
+        5) _log_menu_choice "main" "5"; _flow_clear       ;;
+        6) _clear_local_data                              ;;
+        7) echo "Bye."                                    ;;
+        *) echo "Invalid choice: '${choice}'"; exit 1    ;;
     esac
 }
 
