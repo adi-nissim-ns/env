@@ -22,9 +22,10 @@ BASHRC="${HOME}/.bashrc.${USER}"
 # Optional: export ARTIFACTORY_API_KEY for authenticated access
 API_KEY="${ARTIFACTORY_API_KEY:-}"
 
-# Source swkit-githash / swkit-date helpers so _best_file can rank installers
-# by commit date instead of the embedded build number — build numbers across
-# channels and forks (244 vs 2621) don't reliably reflect chronology.
+# Source the swkit-githash helpers so the menu can decorate labels with cached
+# commit dates and spawn background workers to populate the cache on first
+# launch. Optional — the installer still runs end-to-end without them, just
+# without dates.
 GITHASH_HELPERS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.bashrc.swkit-githash"
 if [[ -f "$GITHASH_HELPERS" ]]; then
     # shellcheck source=/dev/null
@@ -216,13 +217,13 @@ _list_files() {
         | grep -Ev '(^do-not-use-|-remove\.sh$)'
 }
 
-# Read from stdin: return the newest file by commit date (via swkit-date, when
-# available); falls back to highest build number when the date can't be
-# resolved. If quality_filter is given, only consider files of that quality.
+# Read from stdin: return the file with the highest build-number heuristic
+# (first 3 digits of the trailing -NNNN suffix). Pure bash — no forks per
+# line, so it stays fast even with hundreds of candidates.
 _best_file() {
     local quality_filter="${1:-}"
-    local -a candidates=()
-    local fname q
+    local best="" best_h=-1
+    local fname q h
     while IFS= read -r fname; do
         [[ -z "$fname" ]] && continue
         if [[ -n "$quality_filter" ]]; then
@@ -238,29 +239,14 @@ _best_file() {
             esac
             [[ "$q" != "$quality_filter" ]] && continue
         fi
-        candidates+=("$fname")
-    done
-
-    [[ ${#candidates[@]} -eq 0 ]] && return 0
-
-    if command -v swkit-date &>/dev/null; then
-        local best_fname="" best_date="" d
-        for fname in "${candidates[@]}"; do
-            d=$(swkit-date "$fname" 2>/dev/null) || d=""
-            [[ -z "$d" ]] && continue
-            if [[ -z "$best_date" || "$d" > "$best_date" ]]; then
-                best_date="$d"
-                best_fname="$fname"
-            fi
-        done
-        [[ -n "$best_fname" ]] && { echo "$best_fname"; return 0; }
-    fi
-
-    local best="" best_build=-1 b
-    for fname in "${candidates[@]}"; do
-        b=$(_build_num "$fname")
-        [[ "$b" =~ ^[0-9]+$ ]] || continue
-        (( b > best_build )) && { best_build=$b; best="$fname"; }
+        h="${fname%.sh}"
+        h="${h##*-}"
+        [[ "$h" =~ ^[0-9]+$ ]] || continue
+        (( ${#h} > 3 )) && h="${h:0:3}"
+        if (( 10#$h > best_h )); then
+            best_h=$((10#$h))
+            best="$fname"
+        fi
     done
     [[ -n "$best" ]] && echo "$best"
     return 0
@@ -705,8 +691,9 @@ _flow_stable_rc() {
 }
 
 # ── Flow 3: install latest kit ─────────────────────────────────────────────────
-# Picks the chronologically newest file (by commit date, via swkit-date) in the
-# latest rc version, regardless of quality prefix. Falls back to release.
+# Picks the file with the highest build-number heuristic (first 3 digits of the
+# trailing -NNNN suffix) in the latest rc version, regardless of quality
+# prefix. Falls back to release if rc is empty.
 _flow_latest() {
     local channel ver files filename
 
