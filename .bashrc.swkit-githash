@@ -93,17 +93,30 @@ _swkit-githash-from-jenkins() {
 _swkit-date-from-sha() {
     local sha="$1"
     [[ -n "$sha" ]] || return 2
-    local cache="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/nextutils.git"
-    if [[ ! -d "$cache" ]]; then
-        mkdir -p "$(dirname "$cache")" || return 1
-        git init --bare --quiet "$cache" || return 1
+    local repo="${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash/nextutils.git"
+    if [[ ! -d "$repo" ]]; then
+        mkdir -p "$(dirname "$repo")" || return 1
+        git init --bare --quiet "$repo" || return 1
     fi
     local date
-    date="$(git -C "$cache" show -s --format=%cI "$sha" 2>/dev/null)"
+    date="$(git -C "$repo" show -s --format=%cI "$sha" 2>/dev/null)"
     if [[ -z "$date" ]]; then
-        git -C "$cache" fetch --quiet --no-tags --depth=1 \
-            git@github.com:nextsilicon/nextutils.git "$sha" 2>/dev/null || return 1
-        date="$(git -C "$cache" show -s --format=%cI "$sha" 2>/dev/null)"
+        # Serialize fetches — concurrent git-fetch into the same bare repo on
+        # NFS corrupts pack files (multiple workers for different build numbers
+        # would otherwise race here).
+        local fetch_lock="${repo}.fetch.lock"
+        (
+            if command -v flock &>/dev/null; then
+                flock 8 2>/dev/null || exit 1
+            fi
+            # Re-check after acquiring the lock — another worker may have
+            # already fetched this SHA.
+            if ! git -C "$repo" cat-file -e "$sha" 2>/dev/null; then
+                git -C "$repo" fetch --quiet --no-tags --depth=1 \
+                    git@github.com:nextsilicon/nextutils.git "$sha" 2>/dev/null || exit 1
+            fi
+        ) 8>"$fetch_lock" || return 1
+        date="$(git -C "$repo" show -s --format=%cI "$sha" 2>/dev/null)"
     fi
     [[ -n "$date" ]] || return 1
     printf '%s\n' "$date"

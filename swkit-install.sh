@@ -42,6 +42,43 @@ else
     YELLOW=""; GREEN=""; RED=""; NC=""
 fi
 
+# ── Menu history — adaptive defaults ──────────────────────────────────────────
+# Tracks user selections per menu. When the last 3 consecutive picks are the
+# same non-default value, that value becomes the new default for that menu.
+# Stored in ~/.config/swkit/ (home dir — shared across dev environments).
+SWKIT_CONFIG_DIR="${HOME}/.config/swkit"
+
+_log_menu_choice() {
+    local menu="$1" choice="$2"
+    mkdir -p "$SWKIT_CONFIG_DIR" 2>/dev/null
+    echo "$choice" >> "${SWKIT_CONFIG_DIR}/${menu}.history"
+}
+
+_get_menu_default() {
+    local menu="$1" fallback="$2"
+    local hfile="${SWKIT_CONFIG_DIR}/${menu}.history"
+    [[ -f "$hfile" ]] || { echo "$fallback"; return; }
+    local -a last3=()
+    while IFS= read -r line; do
+        last3+=("$line")
+    done < <(tail -3 "$hfile" 2>/dev/null)
+    (( ${#last3[@]} < 3 )) && { echo "$fallback"; return; }
+    if [[ "${last3[0]}" == "${last3[1]}" && "${last3[1]}" == "${last3[2]}" ]]; then
+        echo "${last3[0]}"
+    else
+        echo "$fallback"
+    fi
+}
+
+_clear_local_data() {
+    echo "  Clearing all local swkit data..."
+    rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/swkit-githash" 2>/dev/null
+    rm -rf "${SWKIT_CONFIG_DIR}" 2>/dev/null
+    echo "  Removed: ~/.cache/swkit-githash/ (listings, dates, locks)"
+    echo "  Removed: ~/.config/swkit/ (menu history)"
+    echo "  Done."
+}
+
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 _curl() {
     local -a args=(-sf)
@@ -492,32 +529,29 @@ _install() {
     echo ""
 
     # Ask all options up front before any downloading
-    local lib_ans lib_arg="--no-nextsilicon-libs"
+    local lib_arg="--no-nextsilicon-libs"
     echo "  swkit includes two compute libraries: nextfft and nextblas (C++ with C"
     echo "  and Fortran interfaces). If you are developing a custom build of either"
     echo "  library, skip this — swkit's copies may conflict with your local build."
     echo "  For all other users, installing the libraries is recommended."
-    read -rp "${GREEN}  Install NextSilicon libraries? [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" lib_ans
-    [[ "$lib_ans" =~ ^[Yy]$ ]] && lib_arg=""
+    _prompt_yn "install_libs" "  Install NextSilicon libraries?" "n" && lib_arg=""
 
-    local clear_ans clear_opt=1
+    local clear_opt=1
     echo ""
     echo "  Clearing removes existing swkit packages, DKMS modules, and /opt/nextsilicon"
     echo "  before the fresh install. Recommended when downgrading swkit (old files may"
     echo "  otherwise linger) or when switching from a with-libraries to a"
     echo "  without-libraries install. Safe to skip only on a first-time install."
-    read -rp "${GREEN}  Clear /opt/nextsilicon before install? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" clear_ans
-    [[ "$clear_ans" =~ ^[Nn]$ ]] && clear_opt=0
+    _prompt_yn "install_clear" "  Clear /opt/nextsilicon before install?" "y" || clear_opt=0
 
-    local bashrc_ans update_bashrc=0
+    local update_bashrc=0
     echo ""
     echo "  swkit always installs into /opt/nextsilicon. If you maintain a custom-built"
     echo "  nextutils stack, your NEXT_HOME may currently point to that location instead."
     echo "  Choosing Y updates your ~/.bashrc.USER to source swkit's environment and"
     echo "  exports NEXT_HOME immediately so the change takes effect in the current shell."
     echo "  Choose N to keep using your custom build."
-    read -rp "${GREEN}  Update ${BASHRC} to activate swkit? [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" bashrc_ans
-    [[ "$bashrc_ans" =~ ^[Nn]$ ]] || update_bashrc=1
+    _prompt_yn "install_bashrc" "  Update ${BASHRC} to activate swkit?" "y" && update_bashrc=1
     echo ""
 
     local dl_url="${ARTIFACTORY_HOST}/artifactory/${REPO}/${BASE_PATH}/${channel}/${OS_KEY}/${version}/${filename}"
@@ -559,14 +593,37 @@ _install() {
 }
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
-_confirm() {
+_prompt_yn() {
+    local menu="$1" prompt_text="$2" hardcoded_default="$3"
+    local default
+    default=$(_get_menu_default "$menu" "$hardcoded_default")
     local ans
-    read -rp "${GREEN}$1 [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" ans
+    if [[ "$default" == "y" ]]; then
+        read -rp "${GREEN}${prompt_text} [${GREEN}Y${GREEN}/${RED}n${GREEN}]: ${NC}" ans
+        ans="${ans:-y}"
+    else
+        read -rp "${GREEN}${prompt_text} [${RED}y${GREEN}/${GREEN}N${GREEN}]: ${NC}" ans
+        ans="${ans:-n}"
+    fi
+    local norm
+    norm=$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')
+    norm="${norm:0:1}"
+    _log_menu_choice "$menu" "$norm"
     [[ "$ans" =~ ^[Yy]$ ]]
 }
 
+_find_index_of() {
+    local value="$1"; shift
+    local arr=("$@")
+    local i
+    for i in "${!arr[@]}"; do
+        [[ "${arr[$i]}" == "$value" ]] && { echo "$((i + 1))"; return 0; }
+    done
+    return 1
+}
+
 _offer_clear() {
-    if _confirm "  Clear existing swkit installation?"; then
+    if _prompt_yn "offer_clear" "  Clear existing swkit installation?" "n"; then
         _clear_swkit
     fi
 }
@@ -585,7 +642,7 @@ _flow_stable() {
         files=$(_list_files "release" "$version" 2>/dev/null) || files=""
         if echo "$files" | grep -qxF "$filename"; then
             echo "  Latest stable (latest.txt): release/${version}/$(_label_with_date "$filename")"
-            if _confirm "Install?"; then
+            if _prompt_yn "confirm_install" "Install?" "n"; then
                 _install "release" "$version" "$filename"
             else
                 _offer_clear
@@ -608,7 +665,7 @@ _flow_stable() {
     [[ -z "$filename" ]] && { echo "  No kit found in release/${version}."; return 1; }
 
     echo "  Found: release/${version}/$(_label_with_date "$filename")"
-    if _confirm "Install?"; then
+    if _prompt_yn "confirm_install" "Install?" "n"; then
         _install "release" "$version" "$filename"
     else
         _offer_clear
@@ -628,7 +685,7 @@ _flow_stable_rc() {
     [[ -z "$filename" ]] && { echo "  No stable RC kit found in rc/${ver}."; return 1; }
 
     echo "  Found: rc/${ver}/$(_label_with_date "$filename")"
-    if _confirm "Install?"; then
+    if _prompt_yn "confirm_install" "Install?" "n"; then
         _install "rc" "$ver" "$filename"
     else
         _offer_clear
@@ -655,7 +712,7 @@ _flow_latest() {
 
     [[ -z "$filename" ]] && { echo "  No kits found."; return 1; }
     echo "  Found: ${channel}/${ver}/$(_label_with_date "$filename")"
-    if _confirm "Install?"; then
+    if _prompt_yn "confirm_install" "Install?" "n"; then
         _install "$channel" "$ver" "$filename"
     else
         _offer_clear
@@ -688,17 +745,34 @@ _flow_select() {
         return 1
     fi
 
+    # Build combined labels for history lookup
+    local -a V_LABELS=()
+    for i in "${!V_VERSIONS[@]}"; do
+        V_LABELS+=("${V_CHANNELS[$i]}/${V_VERSIONS[$i]}")
+    done
+
+    local default_vsel="1"
+    local prev_ver
+    prev_ver=$(_get_menu_default "select_version" "")
+    if [[ -n "$prev_ver" ]]; then
+        local found_idx
+        found_idx=$(_find_index_of "$prev_ver" "${V_LABELS[@]}") && default_vsel="$found_idx"
+    fi
+
     echo ""
     printf "  %-4s  %-9s  %s\n"  "#"    "Channel"   "Version"
     printf "  %-4s  %-9s  %s\n"  "----" "---------" "-------"
     local i
     for i in "${!V_VERSIONS[@]}"; do
-        printf "  %-4s  %-9s  %s\n" "$((i+1))" "${V_CHANNELS[$i]}" "${V_VERSIONS[$i]}"
+        local marker=""
+        [[ "$((i+1))" == "$default_vsel" ]] && marker=" [default]"
+        printf "  %-4s  %-9s  %s%s\n" "$((i+1))" "${V_CHANNELS[$i]}" "${V_VERSIONS[$i]}" "$marker"
     done
     echo ""
 
     local vsel
-    read -rp "${GREEN}Select version (0 to cancel): ${NC}" vsel
+    read -rp "${GREEN}Select version (0 to cancel) [${default_vsel}]: ${NC}" vsel
+    vsel="${vsel:-$default_vsel}"
     [[ "$vsel" == "0" ]] && { echo "Cancelled."; return 0; }
     if ! [[ "$vsel" =~ ^[0-9]+$ ]] || [[ "$vsel" -lt 1 ]] || [[ "$vsel" -gt "${#V_VERSIONS[@]}" ]]; then
         echo "Invalid selection."
@@ -708,6 +782,7 @@ _flow_select() {
     local vidx=$(( vsel - 1 ))
     local sel_channel="${V_CHANNELS[$vidx]}"
     local sel_version="${V_VERSIONS[$vidx]}"
+    _log_menu_choice "select_version" "${sel_channel}/${sel_version}"
 
     # Step 2 — pick a file
     echo ""
@@ -776,17 +851,28 @@ _flow_select() {
     # next launch will show them inline.
     _spawn_date_workers "${F_FILES[@]}"
 
+    local default_fsel="1"
+    local prev_kit
+    prev_kit=$(_get_menu_default "select_kit" "")
+    if [[ -n "$prev_kit" ]]; then
+        local found_idx
+        found_idx=$(_find_index_of "$prev_kit" "${F_FILES[@]}") && default_fsel="$found_idx"
+    fi
+
     echo ""
     printf "  %-4s  %-10s  %-7s  %-12s  %s\n"  "#"    "Quality"    "Build"   "Date"         "File"
     printf "  %-4s  %-10s  %-7s  %-12s  %s\n"  "----" "----------" "-------" "------------" "----"
     for i in "${!F_FILES[@]}"; do
-        printf "  %-4s  %-10s  %-7s  %-12s  %s\n" \
-            "$((i+1))" "${F_QUALITIES[$i]}" "${F_BUILDS[$i]}" "${F_DATES[$i]}" "${F_FILES[$i]}"
+        local marker=""
+        [[ "$((i+1))" == "$default_fsel" ]] && marker="  [default]"
+        printf "  %-4s  %-10s  %-7s  %-12s  %s%s\n" \
+            "$((i+1))" "${F_QUALITIES[$i]}" "${F_BUILDS[$i]}" "${F_DATES[$i]}" "${F_FILES[$i]}" "$marker"
     done
     echo ""
 
     local fsel
-    read -rp "${GREEN}Select kit (0 to cancel): ${NC}" fsel
+    read -rp "${GREEN}Select kit (0 to cancel) [${default_fsel}]: ${NC}" fsel
+    fsel="${fsel:-$default_fsel}"
     [[ "$fsel" == "0" ]] && { echo "Cancelled."; return 0; }
     if ! [[ "$fsel" =~ ^[0-9]+$ ]] || [[ "$fsel" -lt 1 ]] || [[ "$fsel" -gt "${#F_FILES[@]}" ]]; then
         echo "Invalid selection."
@@ -794,7 +880,8 @@ _flow_select() {
     fi
 
     local selected="${F_FILES[$(( fsel - 1 ))]}"
-    if _confirm "Install ${sel_channel}/${sel_version}/${selected}?"; then
+    _log_menu_choice "select_kit" "$selected"
+    if _prompt_yn "confirm_install" "Install ${sel_channel}/${sel_version}/${selected}?" "n"; then
         _install "$sel_channel" "$sel_version" "$selected"
     else
         _offer_clear
@@ -803,7 +890,7 @@ _flow_select() {
 
 # ── Flow 5: clear only ────────────────────────────────────────────────────────
 _flow_clear() {
-    if _confirm "Clear existing swkit installation?"; then
+    if _prompt_yn "confirm_clear" "Clear existing swkit installation?" "n"; then
         _clear_swkit
     else
         echo "Cancelled."
@@ -871,27 +958,34 @@ main() {
     [[ -n "$stable_rc_label" ]] && s2="last stable RC   ($(_label_with_date "$stable_rc_label"))"
     [[ -n "$latest_label" ]]    && s3="last kit         ($(_label_with_date "$latest_label"))"
 
-    echo "${GREEN}  1) Install ${s1}  [default]${NC}"
-    echo "${GREEN}  2) Install ${s2}${NC}"
-    echo "${GREEN}  3) Install ${s3}${NC}"
-    echo "${GREEN}  4) List available kits and select${NC}"
-    echo "${GREEN}  5) Clear swkit${NC}"
-    echo "${GREEN}  6) Exit${NC}"
+    local default_choice
+    default_choice=$(_get_menu_default "main" "1")
+    local -a _d=("" "" "" "" "" "" "")
+    _d[$((default_choice - 1))]="  [default]"
+
+    echo "${GREEN}  1) Install ${s1}${_d[0]}${NC}"
+    echo "${GREEN}  2) Install ${s2}${_d[1]}${NC}"
+    echo "${GREEN}  3) Install ${s3}${_d[2]}${NC}"
+    echo "${GREEN}  4) List available kits and select${_d[3]}${NC}"
+    echo "${GREEN}  5) Clear swkit${_d[4]}${NC}"
+    echo "${GREEN}  6) Clear all local data (cache + history)${_d[5]}${NC}"
+    echo "${GREEN}  7) Exit${_d[6]}${NC}"
     echo ""
 
     local choice
-    read -rp "${GREEN}Enter choice [${GREEN}1${GREEN}]: ${NC}" choice
-    choice="${choice:-1}"
+    read -rp "${GREEN}Enter choice [${GREEN}${default_choice}${GREEN}]: ${NC}" choice
+    choice="${choice:-$default_choice}"
     echo ""
 
     case "$choice" in
-        1) _flow_stable     ;;
-        2) _flow_stable_rc  ;;
-        3) _flow_latest     ;;
-        4) _flow_select     ;;
-        5) _flow_clear      ;;
-        6) echo "Bye."      ;;
-        *) echo "Invalid choice: '${choice}'"; exit 1 ;;
+        1) _log_menu_choice "main" "1"; _flow_stable      ;;
+        2) _log_menu_choice "main" "2"; _flow_stable_rc   ;;
+        3) _log_menu_choice "main" "3"; _flow_latest      ;;
+        4) _log_menu_choice "main" "4"; _flow_select      ;;
+        5) _log_menu_choice "main" "5"; _flow_clear       ;;
+        6) _clear_local_data                              ;;
+        7) echo "Bye."                                    ;;
+        *) echo "Invalid choice: '${choice}'"; exit 1    ;;
     esac
 }
 
